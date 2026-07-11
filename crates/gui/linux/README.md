@@ -24,8 +24,13 @@ mkdir -p ~/.local/share/applications
 sed "s|/opt/vendetta-chess/vendetta-chess-gui|$HOME/.local/opt/vendetta-chess/vendetta-chess-gui|" \
     crates/gui/linux/vendetta-chess.desktop > ~/.local/share/applications/vendetta-chess.desktop
 
-# 4. (optionnel) mettre à jour le cache pour que l'entrée apparaisse immédiatement
+# 4. Copier l'icône (voir section "Icône" ci-dessous pour le détail)
+mkdir -p ~/.local/share/icons/hicolor/256x256/apps
+cp crates/gui/linux/vendetta-chess.png ~/.local/share/icons/hicolor/256x256/apps/
+
+# 5. (optionnel) mettre à jour les caches pour que l'entrée/l'icône apparaissent immédiatement
 update-desktop-database ~/.local/share/applications/ 2>/dev/null || true
+gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
 ```
 
 L'application apparaît alors dans le menu des applications sous le nom "Vendetta Chess" et peut
@@ -37,6 +42,8 @@ L'application apparaît alors dans le menu des applications sous le nom "Vendett
 sudo mkdir -p /opt/vendetta-chess
 sudo cp target/release/vendetta-chess-gui /opt/vendetta-chess/
 sudo cp crates/gui/linux/vendetta-chess.desktop /usr/share/applications/
+sudo mkdir -p /usr/share/icons/hicolor/256x256/apps
+sudo cp crates/gui/linux/vendetta-chess.png /usr/share/icons/hicolor/256x256/apps/
 sudo update-desktop-database /usr/share/applications/
 ```
 
@@ -45,15 +52,7 @@ correct, aucune substitution nécessaire.
 
 ## Icône
 
-Aucune icône dédiée n'existe encore dans le projet (`Icon=vendetta-chess` référence un nom qui
-n'est pour l'instant associé à aucun fichier — une icône générique s'affichera). Pour ajouter une
-vraie icône une fois disponible (PNG carré, idéalement 256×256 et/ou SVG) :
-
-```bash
-# utilisateur courant
-mkdir -p ~/.local/share/icons/hicolor/256x256/apps
-cp vendetta-chess.png ~/.local/share/icons/hicolor/256x256/apps/
-
-# système
-sudo cp vendetta-chess.png /usr/share/icons/hicolor/256x256/apps/
-```
+`vendetta-chess.png` (256×256, fourni dans ce dossier) correspond au nom référencé par
+`Icon=vendetta-chess` du fichier `.desktop` — sa copie vers le dossier `hicolor` du thème
+d'icônes est déjà incluse dans les deux procédures d'installation ci-dessus (étape 4 pour
+l'installation utilisateur, ligne dédiée pour l'installation système).

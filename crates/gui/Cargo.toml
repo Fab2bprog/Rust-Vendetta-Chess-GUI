@@ -44,6 +44,15 @@ resvg       = "0.47"
 [build-dependencies]
 slint-build = "1"
 
+# Embarque assets/icon/icon.ico dans l'exécutable Windows (icône visible dans
+# l'Explorateur, la barre des tâches, Alt-Tab). `winresource` est le fork
+# maintenu de `winres` (ce dernier ne compile plus depuis Rust 1.61) — même
+# API. Dépendance de build, jamais compilée/téléchargée sur macOS/Linux
+# grâce au `cfg(windows)` ci-dessous (voir aussi le `#[cfg(windows)]` dans
+# build.rs, qui évite l'appel à `winresource` lui-même sur les autres OS).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 # Métadonnées pour `cargo bundle --release` (crate `cargo-bundle`, à installer
 # une fois avec `cargo install cargo-bundle`). Génère un vrai bundle macOS
 # VendettaChess.app (Contents/MacOS/Info.plist) au lieu de l'exécutable brut :
@@ -57,7 +66,29 @@ copyright = "Copyright (c) 2026 Fabrice"
 category = "public.app-category.board-games"
 short_description = "Interface graphique d'échecs de niveau professionnel"
 long_description = "Vendetta Chess GUI : plateau interactif, horloges, moteurs UCI, tournois, puzzles, annotations PGN et export PDF."
-# Icône (roi doré sur fond bourgogne, cf. crates/gui/assets/icon/). Un seul
-# PNG haute résolution suffit : cargo-bundle génère lui-même le .icns
-# macOS (toutes les tailles requises) à partir de cette source.
-icon = ["assets/icon/icon_1024.png"]
+# Icône (roi doré sur fond bourgogne, cf. crates/gui/assets/icon/).
+# cargo-bundle fait correspondre chaque image fournie à un type d'icône
+# .icns par sa taille en pixels — mais la densité (1x/2x "retina") est
+# déduite du NOM de fichier (suffixe "@2x", voir common::is_retina dans
+# les sources de cargo-bundle), jamais de la taille réelle du fichier.
+# `icon_1024.png` (sans suffixe) était donc traité comme une icône 1024px
+# en densité 1 — taille qui n'existe dans aucun type ICNS (le format ne va
+# jusqu'à 1024px qu'en variante "512@2x") — d'où "No matching IconType".
+# Corrigé en fournissant les tailles 1x réellement supportées par le
+# format (16/32/64/128/256/512) et leurs variantes "@2x" correctement
+# nommées (32/64/256/512/1024 px, associées aux tailles logiques
+# 16/32/128/256/512 — 64@2x n'a pas d'équivalent ICNS, le format n'a
+# simplement pas ce slot).
+icon = [
+    "assets/icon/icon_16.png",
+    "assets/icon/icon_16@2x.png",
+    "assets/icon/icon_32.png",
+    "assets/icon/icon_32@2x.png",
+    "assets/icon/icon_64.png",
+    "assets/icon/icon_128.png",
+    "assets/icon/icon_128@2x.png",
+    "assets/icon/icon_256.png",
+    "assets/icon/icon_256@2x.png",
+    "assets/icon/icon_512.png",
+    "assets/icon/icon_512@2x.png",
+]
