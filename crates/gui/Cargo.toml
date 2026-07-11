@@ -57,6 +57,7 @@ copyright = "Copyright (c) 2026 Fabrice"
 category = "public.app-category.board-games"
 short_description = "Interface graphique d'échecs de niveau professionnel"
 long_description = "Vendetta Chess GUI : plateau interactif, horloges, moteurs UCI, tournois, puzzles, annotations PGN et export PDF."
-# Pas d'icône dédiée pour l'instant : cargo-bundle utilisera l'icône
-# générique macOS. Ajouter un champ icon = ["assets/icon.icns"] ici dès
-# qu'une icône .icns est disponible.
+# Icône (roi doré sur fond bourgogne, cf. crates/gui/assets/icon/). Un seul
+# PNG haute résolution suffit : cargo-bundle génère lui-même le .icns
+# macOS (toutes les tailles requises) à partir de cette source.
+icon = ["assets/icon/icon_1024.png"]
