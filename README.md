@@ -13,6 +13,8 @@ seasoned player, all within a single interface.
 ![Languages](https://img.shields.io/badge/languages-40-orange)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
+![Vendetta Chess GUI screenshot](docs/screenshot.png)
+
 ---
 
 ## Table of Contents
