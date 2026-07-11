@@ -1,0 +1,11 @@
+[package]
+name = "tournament"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+engine = { path = "../engine" }
+db = { path = "../db" }

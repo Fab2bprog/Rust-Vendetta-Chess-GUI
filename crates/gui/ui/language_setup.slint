@@ -1,0 +1,445 @@
+// ui/language_setup.slint
+// Language picker — used on first launch and in preferences.
+//
+// Exported components:
+//   LanguageList        — alphabetically sorted list (first-launch screen)
+//   LanguageDropdown    — dropdown menu reused in preferences (Lang::all() order)
+//   LanguageSetupScreen — first-launch overlay (no close button)
+//
+// Note: PreferencesPanel is now in preferences.slint (full tree).
+
+import { Theme } from "theme.slint";
+import { ListView } from "std-widgets.slint";
+
+/// A language entry (internal code + flag + native name) — shared by
+/// `LanguageList` and `LanguageDropdown` below.
+struct LangEntry {
+    code: string,
+    flag: string,
+    name: string,
+}
+
+// ── Alphabetically sorted list (first launch) ─────────────────────────
+//
+// Replaces the old 2-column button grid (`LangCard` / `LanguageGrid`
+// components, removed on 05/07/2026 at the user's explicit request:
+// "a scrollable table/list sorted alphabetically" rather than
+// buttons). A single column, scrollable (native scrollbar
+// integrated, see below), sorted alphabetically by native name
+// **accent-insensitive** (Č sorted as C, É as E, etc. — without which
+// "Čeština" would have ended up stuck after "Íslenska", far from the other
+// Slavic languages). Languages with a non-Latin alphabet have no
+// possible "true" cross-alphabet order: they therefore naturally group
+// at the end of the list, each staying sorted within its own alphabet — Greek,
+// then Cyrillic (Беларуская, Български, Македонски, Русский, Српски,
+// Українська, correctly in Cyrillic order), then Hebrew, Arabic, Chinese,
+// Japanese, Persian, Hindi and Korean (added on 05/07/2026 at the
+// user's explicit request, in two stages) — these last six, with no
+// possible "true" cross-alphabet order with the previous ones or among themselves, are
+// simply ranked by language name in French/English (Hebrew, Arabic,
+// Chinese, Japanese, Persian, Hindi, Korean), consistent with the order of the
+// ISO 639-1 codes already chosen on the Rust side (`he`, `ar`, `zh`, `ja`, `fa`, `hi`, `ko`).
+//
+// Ergonomics from 05/07/2026 (user feedback: the list, purely scrollable
+// with the mouse wheel inside a bare `Flickable` with no visible scrollbar,
+// gave the impression that it stopped at "Français", and became unusable without
+// a functioning mouse wheel). Replaced `VerticalLayout` with
+// `ListView` (`std-widgets.slint`, already used for the move history
+// in `move_list.slint`): integrated native scrollbar, whose width is
+// automatically reserved by the widget — content never spreads
+// underneath it, with no manual margin calculation needed. `ListView` doesn't have
+// the `spacing` property of `VerticalLayout`: the 4px spacing between rows
+// is therefore now baked into each row's height (48px = 44px of
+// visible pill + 4px of spacing), rather than being carried by the container.
+export component LanguageList inherits ListView {
+    callback language-chosen(string);
+
+    private property <[LangEntry]> sorted-langs: [
+        { code: "bs", flag: "🇧🇦", name: "Bosanski" },
+        { code: "cs", flag: "🇨🇿", name: "Čeština" },
+        { code: "da", flag: "🇩🇰", name: "Dansk" },
+        { code: "de", flag: "🇩🇪", name: "Deutsch" },
+        { code: "et", flag: "🇪🇪", name: "Eesti" },
+        { code: "en", flag: "🇬🇧", name: "English" },
+        { code: "es", flag: "🇪🇸", name: "Español" },
+        { code: "fr", flag: "🇫🇷", name: "Français" },
+        { code: "hr", flag: "🇭🇷", name: "Hrvatski" },
+        { code: "is", flag: "🇮🇸", name: "Íslenska" },
+        { code: "it", flag: "🇮🇹", name: "Italiano" },
+        { code: "lv", flag: "🇱🇻", name: "Latviešu" },
+        { code: "lb", flag: "🇱🇺", name: "Lëtzebuergesch" },
+        { code: "lt", flag: "🇱🇹", name: "Lietuvių" },
+        { code: "hu", flag: "🇭🇺", name: "Magyar" },
+        { code: "mt", flag: "🇲🇹", name: "Malti" },
+        { code: "nl", flag: "🇳🇱", name: "Nederlands" },
+        { code: "no", flag: "🇳🇴", name: "Norsk" },
+        { code: "pl", flag: "🇵🇱", name: "Polski" },
+        { code: "pt", flag: "🇵🇹", name: "Português" },
+        { code: "ro", flag: "🇷🇴", name: "Română" },
+        { code: "sq", flag: "🇦🇱", name: "Shqip" },
+        { code: "sk", flag: "🇸🇰", name: "Slovenčina" },
+        { code: "sl", flag: "🇸🇮", name: "Slovenščina" },
+        { code: "fi", flag: "🇫🇮", name: "Suomi" },
+        { code: "sv", flag: "🇸🇪", name: "Svenska" },
+        { code: "el", flag: "🇬🇷", name: "Ελληνικά" },
+        { code: "be", flag: "🇧🇾", name: "Беларуская" },
+        { code: "bg", flag: "🇧🇬", name: "Български" },
+        { code: "mk", flag: "🇲🇰", name: "Македонски" },
+        { code: "ru", flag: "🇷🇺", name: "Русский" },
+        { code: "sr", flag: "🇷🇸", name: "Српски" },
+        { code: "uk", flag: "🇺🇦", name: "Українська" },
+        { code: "he", flag: "🇮🇱", name: "עברית" },
+        { code: "ar", flag: "🇸🇦", name: "العربية" },
+        { code: "zh", flag: "🇨🇳", name: "中文" },
+        { code: "ja", flag: "🇯🇵", name: "日本語" },
+        { code: "fa", flag: "🇮🇷", name: "فارسی" },
+        { code: "hi", flag: "🇮🇳", name: "हिन्दी" },
+        { code: "ko", flag: "🇰🇷", name: "한국어" },
+    ];
+
+    // Row = 48px (44px of visible pill + 4px of spacing) — see the
+    // component comment about replacing `spacing: 4px`.
+    for lang in root.sorted-langs: Rectangle {
+        height: 48px;
+        background: transparent;
+
+        Rectangle {
+            y: 0px;
+            width: parent.width; height: 44px;
+            border-radius: 8px;
+            background: ta-row.has-hover ? Theme.hover : transparent;
+            animate background { duration: 80ms; }
+
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 12px;
+                spacing: 10px; alignment: start;
+
+                Text {
+                    text: lang.flag;
+                    font-size: 17px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: lang.name;
+                    color: Theme.text; font-size: 12px; font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            ta-row := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.language-chosen(lang.code); }
+            }
+        }
+    }
+}
+
+// ── Language dropdown (Preferences only) ────────────────────────────────
+//
+// Compact dropdown menu for the Preferences panel (ergonomics bugfix from
+// 03/07/2026). Stays in `Lang::all()` order (rather than the alphabetical
+// order of `LanguageList` above) because its closed-state label is looked up by
+// direct indexing (`all-langs[current-index]`), with `current-index` being
+// driven on the Rust side by `Lang::ui_index()` — a looping "code → entry"
+// search would have required a `for ... : if ... : Text {...}` (direct
+// conditional template of a for-loop), a pattern never used elsewhere in this
+// project and of uncertain validity without a local compiler — direct
+// array indexing, on the other hand, is already proven (see
+// `available-engines[0]` in game_setup.slint).
+export component LanguageDropdown inherits Rectangle {
+    /// Index of the active language in Rust-side `Lang::all()` order
+    /// (0 = fr, …, 39 = ko) — see `Lang::ui_index()`.
+    in property <int> current-index: 0;
+    callback language-chosen(string);
+
+    private property <bool> expanded: false;
+
+    // Same 40 languages as `LanguageList` above, but in `Lang::all()` order
+    // (see the component comment) rather than alphabetical order.
+    private property <[LangEntry]> all-langs: [
+        { code: "fr", flag: "🇫🇷", name: "Français" },
+        { code: "en", flag: "🇬🇧", name: "English" },
+        { code: "it", flag: "🇮🇹", name: "Italiano" },
+        { code: "es", flag: "🇪🇸", name: "Español" },
+        { code: "pt", flag: "🇵🇹", name: "Português" },
+        { code: "de", flag: "🇩🇪", name: "Deutsch" },
+        { code: "sv", flag: "🇸🇪", name: "Svenska" },
+        { code: "no", flag: "🇳🇴", name: "Norsk" },
+        { code: "fi", flag: "🇫🇮", name: "Suomi" },
+        { code: "is", flag: "🇮🇸", name: "Íslenska" },
+        { code: "pl", flag: "🇵🇱", name: "Polski" },
+        { code: "nl", flag: "🇳🇱", name: "Nederlands" },
+        { code: "ru", flag: "🇷🇺", name: "Русский" },
+        { code: "uk", flag: "🇺🇦", name: "Українська" },
+        { code: "ro", flag: "🇷🇴", name: "Română" },
+        { code: "el", flag: "🇬🇷", name: "Ελληνικά" },
+        { code: "hu", flag: "🇭🇺", name: "Magyar" },
+        { code: "cs", flag: "🇨🇿", name: "Čeština" },
+        { code: "da", flag: "🇩🇰", name: "Dansk" },
+        { code: "bg", flag: "🇧🇬", name: "Български" },
+        { code: "sk", flag: "🇸🇰", name: "Slovenčina" },
+        { code: "hr", flag: "🇭🇷", name: "Hrvatski" },
+        { code: "sr", flag: "🇷🇸", name: "Српски" },
+        { code: "lt", flag: "🇱🇹", name: "Lietuvių" },
+        { code: "sl", flag: "🇸🇮", name: "Slovenščina" },
+        { code: "lv", flag: "🇱🇻", name: "Latviešu" },
+        { code: "et", flag: "🇪🇪", name: "Eesti" },
+        { code: "sq", flag: "🇦🇱", name: "Shqip" },
+        { code: "mk", flag: "🇲🇰", name: "Македонски" },
+        { code: "bs", flag: "🇧🇦", name: "Bosanski" },
+        { code: "mt", flag: "🇲🇹", name: "Malti" },
+        { code: "be", flag: "🇧🇾", name: "Беларуская" },
+        { code: "lb", flag: "🇱🇺", name: "Lëtzebuergesch" },
+        { code: "he", flag: "🇮🇱", name: "עברית" },
+        { code: "ar", flag: "🇸🇦", name: "العربية" },
+        { code: "zh", flag: "🇨🇳", name: "中文" },
+        { code: "ja", flag: "🇯🇵", name: "日本語" },
+        { code: "fa", flag: "🇮🇷", name: "فارسی" },
+        { code: "hi", flag: "🇮🇳", name: "हिन्दी" },
+        { code: "ko", flag: "🇰🇷", name: "한국어" },
+    ];
+
+    // "Layout" height = only the closed row; the open list
+    // overflows on top without pushing the rest of the panel (like the
+    // tooltips elsewhere in this project — no `clip: true` on this component).
+    height: 40px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: ta-closed.has-hover || root.expanded ? Theme.blue : Theme.surface1;
+    background: ta-closed.has-hover || root.expanded
+        ? Theme.blue.with-alpha(0.12) : Theme.surface0;
+    animate background, border-color { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 12px; padding-right: 12px;
+        spacing: 10px; alignment: start;
+
+        Text {
+            text: root.all-langs[root.current-index].flag + "  "
+                + root.all-langs[root.current-index].name;
+            color: Theme.text; font-size: 12px; font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.expanded ? "▴" : "▾";
+            color: Theme.overlay0; font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    ta-closed := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.expanded = !root.expanded; }
+    }
+
+    // Invisible curtain: a click outside the list closes it, without having to
+    // bubble the `expanded` state up to the Preferences panel.
+    if root.expanded: Rectangle {
+        x: 0; y: 44px;
+        width: parent.width; height: 360px;
+        background: transparent;
+        z: 90;
+        TouchArea { clicked => { root.expanded = false; } }
+    }
+
+    // Dropdown list — capped height + scrolling, same principle as
+    // the Engines tab right next to it: guarantees all 40 languages stay
+    // reachable regardless of available space, without a fragile
+    // pixel-perfect height calculation.
+    //
+    // Ergonomics from 05/07/2026 (same user feedback as `LanguageList`:
+    // list only scrollable with the mouse wheel, with no visible scrollbar)
+    // : `Flickable` + `VerticalLayout` replaced with `ListView`
+    // (`std-widgets.slint`), which provides a native scrollbar whose width
+    // is automatically reserved — content never overflows underneath it,
+    // with no need to manually shave a few pixels off the row
+    // width. `ListView` doesn't have `padding`/`spacing` from
+    // `VerticalLayout`: the original 4px inset is now carried by the
+    // `ListView`'s own positioning (x/y/width/height at -4px/-8px),
+    // and the 2px spacing between rows is baked into each row's
+    // height (36px = 34px of visible pill + 2px of spacing), like in
+    // `LanguageList` earlier in this file.
+    if root.expanded: Rectangle {
+        x: 0; y: 44px;
+        width: parent.width; height: 220px;
+        background: Theme.surface0;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface1;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+        z: 100;
+
+        ListView {
+            x: 4px; y: 4px;
+            width: parent.width - 8px; height: parent.height - 8px;
+
+            for lang in root.all-langs: Rectangle {
+                height: 36px;
+                background: transparent;
+
+                Rectangle {
+                    y: 0px;
+                    width: parent.width; height: 34px;
+                    property <bool> is-active: lang.code == root.all-langs[root.current-index].code;
+                    background: is-active
+                        ? Theme.blue.with-alpha(0.15)
+                        : (ta-row.has-hover ? Theme.hover : transparent);
+                    border-radius: 5px;
+                    animate background { duration: 80ms; }
+
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px;
+                        spacing: 8px; alignment: start;
+
+                        Text {
+                            text: lang.flag;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: lang.name;
+                            color: is-active ? Theme.blue : Theme.text;
+                            font-size: 11px;
+                            font-weight: is-active ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        if is-active: Text {
+                            text: "✓";
+                            color: Theme.blue; font-size: 11px; font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    ta-row := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.language-chosen(lang.code);
+                            root.expanded = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── First-launch screen ────────────────────────────────────────────────────
+//
+// Full-screen overlay shown the first time (no saved language).
+// No Close button — the user must choose a language to continue.
+export component LanguageSetupScreen inherits Rectangle {
+    callback language-chosen(string);
+
+    background: Theme.crust.with-alpha(0.96);
+
+    Rectangle {
+        width: 560px;
+        // Reasonable fixed height (fits any screen): with 40 languages,
+        // the list scrolls (`LanguageList`, integrated native scrollbar) rather
+        // than dictating the window height — same principle as
+        // the Engines tab of Preferences right next to it.
+        height: 560px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 14px;
+        // `clip: true` added on 05/07/2026 (user feedback: the scrollbar
+        // of `LanguageList` seemed to be "outside the window"). Without this
+        // `clip`, the rendering of `ListView`'s native scrollbar — drawn at the
+        // right edge of its own `width: parent.width` — could slightly
+        // overflow the modal's rounded rectangle (560×560) and appear
+        // outside the card, over the dimmed background behind it. The whole
+        // modal is a closed frame (unlike `LanguageDropdown`, whose
+        // dropdown menu intentionally overflows on top of the rest of the
+        // panel): nothing should ever spill outside its rounded frame.
+        clip: true;
+        drop-shadow-blur:     36px;
+        drop-shadow-offset-y: 10px;
+        drop-shadow-color: Theme.shadow;
+
+        VerticalLayout {
+            padding: 28px; spacing: 18px; alignment: start;
+
+            // Bilingual title (universal before the language is chosen)
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: "♟  Vendetta Chess";
+                    color: Theme.blue; font-size: 18px; font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Choisissez votre langue  ·  Choose your language";
+                    color: Theme.overlay0; font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface0; }
+
+            // Bug fixed on 05/07/2026 (user feedback: panel
+            // completely empty after reset, no language selectable).
+            // Cause: this `Flickable` used `vertical-stretch: 1` to
+            // claim the remaining space of the parent `VerticalLayout` — but
+            // `alignment: start` on that same parent disables stretching
+            // for ALL its children (they are stacked at their
+            // natural size). A `Flickable` has no natural size of its own
+            // (it's a scrolling viewport, not content), so it
+            // collapsed to ~0px height: the entire list became
+            // invisible and unreachable, even though its content (generated by
+            // `viewport-height`) remained present in memory.
+            //
+            // Fix: explicit fixed height rather than relying on
+            // stretching — same pattern, already proven, as the internal
+            // `Flickable` of `LanguageDropdown` earlier in this file
+            // (`height: 220px`). Calculation for this 560px modal: 560 -
+            // 56 (top+bottom padding) - 36 (2 spacings of 18px) - ~43
+            // (2-line title block) - 1 (separator) ≈ 424px available;
+            // 400px leaves a safety margin in case the title text
+            // turns out slightly taller than expected.
+            //
+            // Ergonomics from 05/07/2026: `LanguageList` now includes its
+            // own native scrollbar (`ListView`, see the component earlier
+            // in this file) — no more need to wrap it in a manual
+            // `Flickable` here, `LanguageList` handles its own scrolling and
+            // `viewport-height` internally. The lesson from the bug above
+            // still holds: `LanguageList` always needs an explicit
+            // fixed height, since it lives in the same parent
+            // `VerticalLayout` with `alignment: start`.
+            //
+            // Bugfix from 05/07/2026 (user feedback: scrollbar gone,
+            // "feels like the window hid it because the content is
+            // wider than the window itself" — exact diagnosis):
+            // `width: parent.width` was explicitly set here, but
+            // `parent` refers to this `VerticalLayout` itself (padding: 28px),
+            // whose `width` property equals the FULL width of the modal
+            // (560px) — padding only reduces the space allocated to
+            // auto-sized children of the layout, not the layout's own
+            // `width` value. By explicitly setting `width` to 560px, the
+            // `VerticalLayout`'s automatic sizing was disabled
+            // (which would otherwise have given 560 - 2×28 = 504px): `LanguageList`
+            // therefore overflowed by 56px total to the right of the modal — and
+            // it's exactly in that overflowing strip that the
+            // scrollbar lived, hence its disappearance once `clip: true` was added
+            // to the modal (the overflow, invisible outside the frame
+            // before, is now simply cut off/hidden). Removing the
+            // explicit `width:` binding restores the correct sizing
+            // (504px) via the parent `VerticalLayout`, as the old
+            // `Flickable` already implicitly did (it itself had no
+            // explicit width).
+            LanguageList {
+                height: 400px;
+                language-chosen(code) => { root.language-chosen(code); }
+            }
+        }
+    }
+}
+
+// (PreferencesPanel is in preferences.slint)

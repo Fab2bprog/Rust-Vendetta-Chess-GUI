@@ -1,0 +1,1067 @@
+// ui/reference_browser.slint — Reference game database browser screen
+// (PHASE 82, step 7).
+//
+// Accessible from the "New Game" wizard ("Browse Database" card,
+// see `game_setup.slint` and `open-navigation-base` in `app.slint`) once
+// at least one game has been imported (Preferences → Game
+// database). Standalone entry point from the main menu: not yet
+// built (out of scope for this step).
+//
+// Structure:
+//   ┌──────────────────────────────────────────────────────────┐
+//   │  📚  Game database (Browser)                        [X]  │
+//   ├────────────────────────────────────────────────────────────┤
+//   │  [Player] [Elo min] [Elo max] [Date from] [Date to] [ECO]  │
+//   │                                   [Reset][Search]           │
+//   │  N result(s)                                                │
+//   │  White         Black         Result    Date     ECO   Elo   │
+//   │  ──────────────────────────────────────────────────────────│
+//   │  (scrollable game list, one row per game)                   │
+//   ├──────────────────────────────────────────────────────────┤
+//   │              ◂ Previous   Page 1  Next ▸                    │
+//   └──────────────────────────────────────────────────────────┘
+//
+// Synchronous search on the Rust side (see `main.rs`, callback
+// `search-reference-games`): a paginated query (LIMIT 50) on
+// indexed columns stays in the millisecond range even over several
+// hundred thousand games (see `reference_game_repo.rs`) — no
+// need for a dedicated thread or a loading indicator, unlike
+// full PGN import (potentially several minutes).
+//
+// Clicking a row calls `game-selected(id)`: for now with no
+// effect wired up on the `app.slint` side (the detail screen — opening tree,
+// evaluation curve, replay from a move — corresponds to steps 8/15
+// to 17, not yet built).
+
+import { Theme } from "theme.slint";
+import { Tr }    from "translations.slint";
+import { ListView } from "std-widgets.slint";
+import { ChessBoard, SquareData } from "board.slint";
+import { CapturedPiecesBar, CapturedPieceData } from "captured_bar.slint";
+
+/// A search-result row, pre-formatted on the Rust side (see
+/// `main.rs`, conversion from `db::repository::reference_game_repo::ReferenceGameRow`).
+/// Named differently from its Rust counterpart (`ReferenceGameRow`, in the
+/// `db` crate) to avoid any name collision once both types are
+/// imported side by side in `main.rs`.
+export struct ReferenceGameListRow {
+    id: int,
+    white: string,
+    black: string,
+    result: string,
+    date: string,       // "?" if absent
+    eco: string,        // "" if absent
+    opening: string,    // opening name resolved from `eco` (step 11); "" if unresolved
+    white-elo: string,  // "—" if absent
+    black-elo: string,  // "—" if absent
+}
+
+/// A candidate move from the current position of the opening tree
+/// (PHASE 82, step 8), with its aggregated statistics — see `main.rs`,
+/// conversion from `db::repository::opening_repo::OpeningMoveStats`.
+/// `san` is computed on the Rust side (resolving the stored UCI move against the
+/// legal moves of the reached position, see `notation::move_to_san`) —
+/// no notation is stored in the database, only UCI is.
+///
+/// `checked` (ergonomics follow-up 10/07/2026 — missing bridge between the opening
+/// tree and the game list, user feedback): reflects the state
+/// of the row's checkbox, entirely driven on the Rust side (shared
+/// state, reset to `false` across the whole list on every path
+/// change) — never modified directly on the Slint side.
+///
+/// `arrow-path` (ergonomics follow-up 10/07/2026 — visualization board,
+/// user feedback on the table's wasted space): SVG commands for
+/// the arrow representing THIS move on the board (same 8×8 viewbox as
+/// `ChessBoard.hint-arrow-path`, computed once and for all on the Rust side
+/// via `compute_hint_arrow`, never recomputed on the Slint side). Only shown
+/// on the board when hovering over the corresponding row — state purely
+/// local to `OpeningTreeTab`, see `active-arrow` below.
+export struct OpeningMoveRow {
+    san: string,
+    uci: string,
+    games: int,
+    white-wins: int,
+    draws: int,
+    black-wins: int,
+    checked: bool,
+    arrow-path: string,
+}
+
+// ── Small reusable text filter field ─────────────────────────────────────
+//
+// Same pattern as `spin-in` in `preferences.slint` (local alias
+// `bound-value` + resync `changed`): needed whenever a
+// `TextInput` must both accept user typing AND be
+// updated from the outside (here: the "Reset" button).
+component FilterField inherits Rectangle {
+    in property <string> label: "";
+    in-out property <string> value: "";
+
+    height: 46px;
+
+    VerticalLayout {
+        spacing: 3px; alignment: start;
+        Text {
+            text: root.label;
+            color: Theme.overlay0; font-size: 9px; font-weight: 600;
+        }
+        Rectangle {
+            height: 26px;
+            border-radius: 4px;
+            background: Theme.surface1;
+            border-width: field-in.has-focus ? 1px : 0px;
+            border-color: Theme.blue;
+            clip: true;
+            animate border-color { duration: 80ms; }
+
+            field-in := TextInput {
+                property <string> bound-value: root.value;
+                x: 6px; width: parent.width - 12px;
+                height: parent.height;
+                text: root.value;
+                color: Theme.text; font-size: 10px;
+                vertical-alignment: center;
+                edited   => { root.value = self.text; }
+                accepted => { root.value = self.text; }
+                changed bound-value => {
+                    if (self.text != self.bound-value) {
+                        self.text = self.bound-value;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── "Opening Tree" tab (PHASE 82, step 8) ──────────────────────
+//
+// Move-by-move navigation from the standard starting position: each
+// click on a candidate move drills deeper into the tree (delegates to Rust via
+// `move-chosen`, which manages the path and queries the next moves — this
+// component is purely a display, no path state here). The
+// minimum Elo threshold is a simple query filter (decision made in
+// discussion, PHASE 82, point 5): it never changes the displayed
+// position, only the aggregated statistics.
+component OpeningTreeTab inherits Rectangle {
+    in property <string> path-display: "";
+    in property <[OpeningMoveRow]> candidates: [];
+    in property <int> total-games: 0;
+    in-out property <string> elo-min: "";
+    in property <bool> can-go-back: false;
+
+    // Ergonomics follow-up 10/07/2026 — bridge to the "Games" tab (user
+    // feedback: the tree showed statistics but never let the user
+    // browse the games making them up). `selected-count`
+    // is computed on the Rust side (`games_for_path` query, never a simple
+    // local sum of checked rows: it must stay consistent with the
+    // current Elo filter and the "nothing checked = everything selected" semantics).
+    // `all-checked` only drives the label of the
+    // "Check all"/"Uncheck all" link, never its actual state on the Slint side.
+    in property <int> selected-count: 0;
+    in property <bool> all-checked: false;
+
+    // Ergonomics follow-up 10/07/2026 — visualization board (user
+    // feedback: "huge waste of space" from the table, the "Move" column
+    // with `horizontal-stretch` for content of 2 to 6 characters created a
+    // huge gap before the "Games" column). The table is now a
+    // fixed width and the freed-up space on the right shows the reached
+    // position, read-only — never interactive (decision made with
+    // the user).
+    in property <[SquareData]> board-squares: [];
+    in property <[CapturedPieceData]> captured-by-white: [];
+    in property <[CapturedPieceData]> captured-by-black: [];
+    in property <int> material-diff: 0;
+
+    callback move-chosen(string);
+    callback go-back();
+    callback reset();
+    callback filter-changed();
+    callback toggle-move(string);
+    callback toggle-all();
+    callback list-games();
+
+    // Arrow of the currently hovered move (ergonomics follow-up 10/07/2026) —
+    // purely local, reactive state, never propagated to Rust: each row
+    // already carries its pre-computed arrow (`m.arrow-path`), all that's left is
+    // knowing which one to display based on the hovered row (see `ta-m`
+    // below, `changed has-hover`).
+    private property <string> active-arrow: "";
+
+    VerticalLayout {
+        spacing: 10px;
+
+        // Breadcrumb + navigation
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                width: 90px; height: 24px; border-radius: 5px;
+                background: (ta-back.has-hover && root.can-go-back) ? Theme.hover : Theme.surface1;
+                opacity: root.can-go-back ? 1.0 : 0.4;
+                Text {
+                    text: Tr.refbrowser-tree-back;
+                    color: Theme.text; font-size: 10px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    width: parent.width; height: parent.height;
+                }
+                ta-back := TouchArea {
+                    mouse-cursor: root.can-go-back ? pointer : default;
+                    clicked => { if (root.can-go-back) { root.go-back(); } }
+                }
+            }
+            Rectangle {
+                width: 110px; height: 24px; border-radius: 5px;
+                background: ta-restart.has-hover ? Theme.hover : Theme.surface1;
+                Text {
+                    text: Tr.refbrowser-tree-restart;
+                    color: Theme.text; font-size: 10px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    width: parent.width; height: parent.height;
+                }
+                ta-restart := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.reset(); }
+                }
+            }
+            Text {
+                text: root.path-display == "" ? Tr.refbrowser-tree-start-position : root.path-display;
+                color: Theme.text; font-size: 11px; font-weight: 600;
+                vertical-alignment: center; overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+
+        // Ergonomics follow-up 10/07/2026 — subtitle explaining the tab's
+        // actual use (check games then find them in "Games"),
+        // since the tab's short label ("Filter by opening", decision
+        // made with the user) doesn't have room to spell it out.
+        Text {
+            text: Tr.refbrowser-tree-subtitle;
+            color: Theme.overlay0; font-size: 9px;
+            wrap: word-wrap;
+        }
+
+        // Min Elo filter + Apply button
+        HorizontalLayout {
+            spacing: 8px;
+            FilterField {
+                width: 90px;
+                label: Tr.refbrowser-filter-elo-min;
+                value <=> root.elo-min;
+            }
+            Rectangle {
+                y: 17px;
+                width: 90px; height: 26px; border-radius: 5px;
+                background: ta-apply.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue;
+                Text {
+                    text: Tr.refbrowser-tree-apply;
+                    color: Theme.base; font-size: 10px; font-weight: 700;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    width: parent.width; height: parent.height;
+                }
+                ta-apply := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.filter-changed(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // "Check all / Uncheck all" link + counter — ergonomics follow-up
+        // 10/07/2026: moved back to the LEFT (user feedback, "Check All is
+        // on the right and it doesn't mean anything where it is") — placed just
+        // before the "N games reach this position" sentence, above
+        // the table (same left edge as it), rather than isolated all
+        // the way on the right of the card, 500px of visual distance from the table
+        // it concerns.
+        HorizontalLayout {
+            spacing: 8px;
+
+            // Ergonomics bugfix 10/07/2026: user feedback, "Check
+            // all" wasn't responding to any click. `Text` and `TouchArea`
+            // were declared as two direct SIBLING children of the
+            // `HorizontalLayout` — a `TouchArea` with no explicit width
+            // has no content of its own from which to derive a size in a
+            // layout (unlike an ordinary `Rectangle`, where it
+            // automatically fills all of the parent's space): the
+            // layout therefore assigned it zero width,
+            // making it exactly invisible to clicks. Fix: both nested
+            // inside a `Rectangle` with an explicit width (same pattern already
+            // used for the "Back"/"Restart" buttons of the breadcrumb
+            // above).
+            Rectangle {
+                width: 110px; height: 20px;
+                Text {
+                    text: root.all-checked ? Tr.refbrowser-tree-uncheck-all : Tr.refbrowser-tree-check-all;
+                    color: ta-toggle-all.has-hover ? Theme.blue.with-alpha(0.8) : Theme.blue;
+                    font-size: 10px; font-weight: 600;
+                    horizontal-alignment: left; vertical-alignment: center;
+                    width: parent.width; height: parent.height;
+                }
+                ta-toggle-all := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle-all(); }
+                }
+            }
+            Text {
+                text: root.total-games + " " + Tr.refbrowser-tree-games-suffix;
+                color: Theme.overlay0; font-size: 10px;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // Table (fixed width) + visualization board, side by side,
+        // scoped to the list's height only (ergonomics follow-up
+        // 10/07/2026, decision made with the user) — the
+        // breadcrumb/subtitle/Elo filter/counter rows above stay at
+        // full width, only this area is split into two columns.
+        HorizontalLayout {
+            spacing: 16px;
+            vertical-stretch: 1;
+
+            // ── Table column ────────────────────────────────────────
+            VerticalLayout {
+                width: 430px;
+
+                // Column headers — "Move" at a FIXED width (80px,
+                // wide enough for any realistic early-game SAN,
+                // e.g. "Nbxd7+") instead of `horizontal-stretch: 1`
+                // : it's this stretching that created the huge empty space
+                // reported by the user before the "Games" column.
+                HorizontalLayout {
+                    padding-left: 8px; padding-right: 8px;
+                    spacing: 4px;
+                    Rectangle { width: 24px; }
+                    Text { text: Tr.refbrowser-tree-col-move;      width: 80px; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                    Text { text: Tr.refbrowser-tab-games;          width: 80px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                    Text { text: Tr.refbrowser-tree-col-white-pct; width: 70px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                    Text { text: Tr.refbrowser-tree-col-draw-pct;  width: 70px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                    Text { text: Tr.refbrowser-tree-col-black-pct; width: 70px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                }
+                Rectangle { height: 1px; background: Theme.surface0; }
+
+                if root.candidates.length == 0: Rectangle {
+                    vertical-stretch: 1;
+                    Text {
+                        text: Tr.refbrowser-tree-no-moves;
+                        color: Theme.overlay0; font-size: 11px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                        width: parent.width; height: parent.height;
+                    }
+                }
+                if root.candidates.length > 0: ListView {
+                    vertical-stretch: 1;
+
+                    for m in root.candidates: Rectangle {
+                        height: 34px;
+                        // Hovering over the checkbox (`ta-check`, nested further
+                        // down the tree) is deliberately not mixed in here —
+                        // referencing an id located more than one nesting level
+                        // deep from an ancestor's binding is not a pattern already
+                        // established elsewhere in this project; `ta-m` alone (same level
+                        // as this `Rectangle`) is enough for hovering over the whole
+                        // row, consistent with the behavior before this fix.
+                        background: ta-m.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 80ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 4px;
+                            Rectangle {
+                                width: 24px;
+                                Rectangle {
+                                    width: 14px; height: 14px;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 3px;
+                                    border-width: 1px;
+                                    border-color: m.checked ? Theme.blue : Theme.overlay0;
+                                    background: m.checked ? Theme.blue : transparent;
+                                    Path {
+                                        visible: m.checked;
+                                        width: 8px; height: 8px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        commands: "M1 4 L4 7 L9 1";
+                                        viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 8;
+                                        stroke: Theme.base;
+                                        stroke-width: 1.4px;
+                                    }
+                                }
+
+                                // Ergonomics bugfix 10/07/2026: the checkbox's
+                                // click area is nested INSIDE its own
+                                // `Rectangle` (24px) rather than overlaid by
+                                // relying on declaration order — user
+                                // feedback, "if I click a checkbox it's
+                                // the same as clicking the row": two
+                                // `TouchArea`s occupying the same area both
+                                // caught the click, `move-chosen` immediately
+                                // overwriting the checked state via a new path.
+                                // Geometries are now strictly disjoint (24px
+                                // for the checkbox, the rest for the row) rather
+                                // than relying on z-stacking, which doesn't guarantee
+                                // click exclusivity.
+                                ta-check := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle-move(m.uci); }
+                                }
+                            }
+                            Text {
+                                text: m.san; width: 80px;
+                                color: Theme.text; font-size: 11px; font-weight: 600;
+                                vertical-alignment: center; overflow: elide;
+                            }
+                            Text {
+                                text: m.games; width: 80px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                color: Theme.overlay0; font-size: 10px;
+                            }
+                            Text {
+                                text: ((m.white-wins * 100) / max(1, m.games)) + " %"; width: 70px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                color: Theme.overlay0; font-size: 10px;
+                            }
+                            Text {
+                                text: ((m.draws * 100) / max(1, m.games)) + " %"; width: 70px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                color: Theme.overlay0; font-size: 10px;
+                            }
+                            Text {
+                                text: ((m.black-wins * 100) / max(1, m.games)) + " %"; width: 70px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                color: Theme.overlay0; font-size: 10px;
+                            }
+                        }
+
+                        // "Drill into the tree" click area, positioned AFTER the
+                        // checkbox column (24px + 8px of left padding of the
+                        // `HorizontalLayout` above) — no longer ever overlaps
+                        // `ta-check`, the two areas are now disjoint.
+                        //
+                        // `changed has-hover` (ergonomics follow-up 10/07/2026): drives
+                        // the preview arrow on the visualization
+                        // board — purely reactive, no Rust round trip.
+                        // Since row hover areas are disjoint
+                        // (only one row can be hovered at a time), leaving
+                        // one row before entering the next is
+                        // guaranteed, so a simple "empty at the start" is safe here.
+                        ta-m := TouchArea {
+                            x: 32px; width: parent.width - 32px; height: parent.height;
+                            mouse-cursor: pointer;
+                            clicked => { root.move-chosen(m.uci); }
+                            changed has-hover => {
+                                root.active-arrow = self.has-hover ? m.arrow-path : "";
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 8px; }
+
+                // "List games (N)" button — ergonomics follow-up
+                // 10/07/2026. Moved INSIDE the table column
+                // (user feedback: "the wide button... gets clipped at
+                // the bottom of the window... instead of it occupying the whole
+                // window width, make it occupy the table's
+                // width") — width automatically that of the column
+                // (430px) instead of the whole card, and above all now
+                // shares the available height WITH the list (`ListView`
+                // right above, `vertical-stretch: 1`) rather than being
+                // added AFTER the entire table+board row — the list
+                // naturally gives up a bit of room to the button ("shrink
+                // the table a little", user suggestion), instead of
+                // the button being pushed below the entire row, taller
+                // since the board was enlarged.
+                //
+                // `selected-count` reflects either the games of the checked
+                // moves, or the entirety of the current position if nothing
+                // is checked (default "everything selected", never an
+                // empty table forcing the user to check everything
+                // manually).
+                Rectangle {
+                    height: 30px; border-radius: 5px;
+                    background: ta-list.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue;
+                    opacity: root.selected-count > 0 ? 1.0 : 0.4;
+                    animate background { duration: 80ms; }
+                    Text {
+                        text: Tr.refbrowser-tree-list-games + " (" + root.selected-count + ")";
+                        color: Theme.base; font-size: 11px; font-weight: 700;
+                        horizontal-alignment: center; vertical-alignment: center;
+                        width: parent.width; height: parent.height;
+                    }
+                    ta-list := TouchArea {
+                        mouse-cursor: root.selected-count > 0 ? pointer : default;
+                        clicked => { if (root.selected-count > 0) { root.list-games(); } }
+                    }
+                }
+            }
+
+            // ── Visualization board column ────────────────────────
+            // Always White at the bottom (decision made with the user —
+            // independent of the current game's orientation); read
+            // only (no `square-clicked` wired up). The capture bars
+            // follow the same visual convention as the main board
+            // (`app.slint`): opposing side (Black, always here
+            // at the top since the orientation is fixed) at the top, White side
+            // at the bottom.
+            //
+            // Ergonomics follow-up 10/07/2026: size bumped from 260px to 320px
+            // (+60px ≈ 1.5cm), then to 360px (+40px ≈ 1cm), then to 400px
+            // (+40px ≈ 1cm, third round of user feedback) — same scale as
+            // the previous bugfixes in this follow-up (20px/5mm, 40px/1cm);
+            // alignment changed from `center` to `start` ("aligned to the top
+            // of the table rather than centered vertically").
+            VerticalLayout {
+                width: 400px;
+                alignment: start;
+                spacing: 4px;
+
+                CapturedPiecesBar {
+                    width: 400px;
+                    pieces: root.captured-by-black;
+                    material-diff: -root.material-diff;
+                }
+                ChessBoard {
+                    width: 400px; height: 400px;
+                    squares: root.board-squares;
+                    flipped: false;
+                    show-coordinates: true;
+                    hint-arrow-path: root.active-arrow;
+                }
+                CapturedPiecesBar {
+                    width: 400px;
+                    pieces: root.captured-by-white;
+                    material-diff: root.material-diff;
+                }
+            }
+        }
+    }
+}
+
+export component ReferenceBrowser inherits Rectangle {
+    // ── Source being browsed (follow-up 11/07/2026): 0 = PGN database, 1 = SCID database.
+    // A single property governs BOTH tabs (game list AND
+    // opening tree) — see the selector in the tab row
+    // below, and `source-changed`, which requests everything again from Rust.
+    in-out property <int> source: 0;
+    callback source-changed();  // Rust: re-search + reset the tree from the new source
+
+    // ── Filters (local draft, read on the Rust side on every search) ───────
+    in-out property <string> filter-player:    "";
+    in-out property <string> filter-elo-min:   "";
+    in-out property <string> filter-elo-max:   "";
+    in-out property <string> filter-date-from: "";
+    in-out property <string> filter-date-to:   "";
+    in-out property <string> filter-eco:       "";
+
+    // ── Results (filled by Rust after each search) ───────────────────────
+    in property <[ReferenceGameListRow]> games: [];
+    in property <int> total-count: 0;
+    in-out property <int> page: 0;   // current page, 0-based
+
+    // Page size fixed on the Rust side (see `main.rs`, `PAGE_SIZE` constant
+    // of the `search-reference-games` callback) — duplicated here only to
+    // compute the displayed total page count; no resync
+    // needed, both values are constants fixed on either
+    // side.
+    private property <int> page-size: 50;
+    private property <int> total-pages: max(1, (root.total-count + root.page-size - 1) / root.page-size);
+
+    callback search-games();      // Rust: rereads all filter-* + page=0
+    callback reset-filters();     // Rust: clears the filters, page=0, reruns a search
+    callback go-to-page(int);     // Rust: changes page (rereads the current filters)
+    callback game-selected(int);  // Rust: opens the detail view (steps 15 to 17, not yet wired up)
+    callback close-panel;
+
+    // ── Active tab: 0 = game list, 1 = opening tree ───────
+    // `in-out` (no longer `private`) since the ergonomics follow-up 10/07/2026:
+    // the tree's "List games" button must be able to bring
+    // the user back to the "Games" tab from Rust (`win.set_reference_
+    // browser_active_tab(0)`), in addition to manually clicking the tabs.
+    in-out property <int> active-tab: 0;
+
+    // ── Opening tree (PHASE 82, step 8) ────────────────────────────
+    // Move path entirely managed on the Rust side (`Rc<RefCell<Vec<String>>>`
+    // shared between the `tree-*` callbacks, see `main.rs`) — this component
+    // only displays `tree-path-display` and notifies clicks, never
+    // manipulates a move array on the Slint side.
+    in property <string> tree-path-display: "";
+    in property <[OpeningMoveRow]> tree-candidates: [];
+    in property <int> tree-total-games: 0;
+    in-out property <string> tree-elo-min: "";
+    in property <bool> tree-can-go-back: false;
+    callback tree-move-chosen(string);  // Rust: adds this move to the path, queries
+    callback tree-go-back();            // Rust: removes the last move from the path, queries
+    callback tree-reset();              // Rust: clears the path, queries (starting position)
+    callback tree-filter-changed();     // Rust: rereads tree-elo-min, queries (path unchanged)
+
+    // Ergonomics follow-up 10/07/2026 — bridge from the opening tree to the
+    // game list (see `OpeningTreeTab` for details on the corresponding
+    // properties/callbacks; these merely relay them to Rust).
+    in property <int> tree-selected-count: 0;
+    in property <bool> tree-all-checked: false;
+    callback tree-toggle-move(string);
+    callback tree-toggle-all();
+    callback tree-list-games();
+
+    // Ergonomics follow-up 10/07/2026 — visualization board (see
+    // `OpeningTreeTab` for details).
+    in property <[SquareData]> tree-board-squares: [];
+    in property <[CapturedPieceData]> tree-captured-by-white: [];
+    in property <[CapturedPieceData]> tree-captured-by-black: [];
+    in property <int> tree-material-diff: 0;
+
+    // Active filter indicator in the "Games" tab (decision made
+    // with the user: the tree filter COMBINES with the classic
+    // player/Elo/date/ECO filters, via logical AND, and stays active as
+    // long as the user doesn't explicitly click its removal
+    // button — never implicitly cleared by a "Reset" that
+    // only targeted the classic filters).
+    in property <bool> tree-filter-active: false;
+    in property <string> tree-filter-label: "";
+    callback tree-filter-clear();
+
+    background: Theme.crust.with-alpha(0.85);
+    ta-bg := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.close-panel(); }
+    }
+
+    // ── Main card 1040 × 760 ─────────────────────────────────────────
+    // Width bumped from 960 to 1040px (ergonomics bugfix 09/07/2026, user
+    // feedback: "Search" button clipped): the Games tab's filter
+    // row (6 fixed-width fields + "Reset" button +
+    // "Search" button, 8px of spacing between each element) needs
+    // about 984px of width excluding padding — with the 16px padding on
+    // each side of the body, a 960px card (928px usable) was therefore already
+    // about fifty pixels too narrow, clipping the
+    // "Search" button (the last element in the row).
+    //
+    // Height bumped from 640 to 720px then 760px (ergonomics follow-up
+    // 10/07/2026, successive user feedback: "List games" button
+    // clipped, then another enlargement of the "Filter by opening" tab's
+    // visualization board, now
+    // 400×400px). Calculation at each step: minimum height of the
+    // board column = board + 2 capture bars (26px) + 2 spacings
+    // (4px), fixed-size content, non-compressible; ~262px of fixed
+    // content above the table/board area (card header,
+    // body padding, tab row, breadcrumb, subtitle, Elo
+    // filter, counter/check-all row, spacings). At 400px board size:
+    // board column ≈ 460px, theoretical total ≈ 722px, rounded up to 760px
+    // to keep the same margin (~38px) as the previous step rather
+    // than a pixel-perfect adjustment.
+    Rectangle {
+        width: 1040px; height: 760px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 14px;
+        drop-shadow-blur:     40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+
+        // Stops click propagation (avoids closing via ta-bg)
+        ta-card := TouchArea { width: parent.width; height: parent.height; }
+
+        VerticalLayout {
+
+            // ── Header ────────────────────────────────────────────────
+            Rectangle {
+                height: 50px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 12px;
+
+                    Text {
+                        text: "📚  " + Tr.prefs-reference-base-title;
+                        color: Theme.text; font-size: 14px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Close button (vector cross, see CLAUDE_AI.md)
+                    Rectangle {
+                        width: 30px; height: 30px; border-radius: 6px;
+                        background: ta-x.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Path {
+                            width: 12px; height: 12px;
+                            x: (parent.width  - self.width)  / 2;
+                            y: (parent.height - self.height) / 2;
+                            commands: "M1 1 L9 9 M9 1 L1 9";
+                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                            stroke: Theme.overlay0;
+                            stroke-width: 1.4px;
+                        }
+                        ta-x := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close-panel(); }
+                        }
+                    }
+                }
+            }
+
+            // ── Body ──────────────────────────────────────────────────
+            VerticalLayout {
+                padding: 16px; spacing: 10px;
+                vertical-stretch: 1;
+
+                // ── Tabs ──────────────────────────────────────────
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Rectangle {
+                        width: 140px; height: 26px; border-radius: 5px;
+                        background: root.active-tab == 0 ? Theme.blue.with-alpha(0.15) : Theme.surface1;
+                        Text {
+                            text: Tr.refbrowser-tab-games;
+                            color: root.active-tab == 0 ? Theme.blue : Theme.text;
+                            font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.active-tab = 0; }
+                        }
+                    }
+                    Rectangle {
+                        width: 140px; height: 26px; border-radius: 5px;
+                        background: root.active-tab == 1 ? Theme.blue.with-alpha(0.15) : Theme.surface1;
+                        Text {
+                            text: Tr.refbrowser-tab-tree;
+                            color: root.active-tab == 1 ? Theme.blue : Theme.text;
+                            font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.active-tab = 1; }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // ── PGN/SCID source selector (follow-up 11/07/2026) ──
+                    // On the right of the tab row, applies to both
+                    // tabs at once (see `root.source` at the top of this
+                    // component).
+                    Rectangle {
+                        width: 60px; height: 26px; border-radius: 5px;
+                        background: root.source == 0 ? Theme.blue.with-alpha(0.15) : Theme.surface1;
+                        Text {
+                            text: "PGN";
+                            color: root.source == 0 ? Theme.blue : Theme.text;
+                            font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.source != 0 {
+                                    root.source = 0;
+                                    root.source-changed();
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: 60px; height: 26px; border-radius: 5px;
+                        background: root.source == 1 ? Theme.blue.with-alpha(0.15) : Theme.surface1;
+                        Text {
+                            text: "SCID";
+                            color: root.source == 1 ? Theme.blue : Theme.text;
+                            font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if root.source != 1 {
+                                    root.source = 1;
+                                    root.source-changed();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.active-tab == 1: OpeningTreeTab {
+                    vertical-stretch: 1;
+                    path-display:   root.tree-path-display;
+                    candidates:     root.tree-candidates;
+                    total-games:    root.tree-total-games;
+                    elo-min        <=> root.tree-elo-min;
+                    can-go-back:    root.tree-can-go-back;
+                    selected-count: root.tree-selected-count;
+                    all-checked:    root.tree-all-checked;
+                    board-squares:      root.tree-board-squares;
+                    captured-by-white:  root.tree-captured-by-white;
+                    captured-by-black:  root.tree-captured-by-black;
+                    material-diff:      root.tree-material-diff;
+                    move-chosen(uci) => { root.tree-move-chosen(uci); }
+                    go-back        => { root.tree-go-back(); }
+                    reset          => { root.tree-reset(); }
+                    filter-changed => { root.tree-filter-changed(); }
+                    toggle-move(uci) => { root.tree-toggle-move(uci); }
+                    toggle-all     => { root.tree-toggle-all(); }
+                    list-games     => { root.tree-list-games(); }
+                }
+
+                // Filter row
+                if root.active-tab == 0: HorizontalLayout {
+                    spacing: 8px;
+
+                    FilterField {
+                        width: 220px;
+                        label: Tr.refbrowser-filter-player;
+                        value <=> root.filter-player;
+                    }
+                    FilterField {
+                        width: 90px;
+                        label: Tr.refbrowser-filter-elo-min;
+                        value <=> root.filter-elo-min;
+                    }
+                    FilterField {
+                        width: 90px;
+                        label: Tr.refbrowser-filter-elo-max;
+                        value <=> root.filter-elo-max;
+                    }
+                    FilterField {
+                        width: 110px;
+                        label: Tr.refbrowser-filter-date-from;
+                        value <=> root.filter-date-from;
+                    }
+                    FilterField {
+                        width: 110px;
+                        label: Tr.refbrowser-filter-date-to;
+                        value <=> root.filter-date-to;
+                    }
+                    FilterField {
+                        width: 80px;
+                        label: Tr.refbrowser-filter-eco;
+                        value <=> root.filter-eco;
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // "Reset" button
+                    Rectangle {
+                        y: 17px;
+                        width: 110px; height: 26px; border-radius: 5px;
+                        background: ta-reset.has-hover ? Theme.hover : Theme.surface1;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: Tr.refbrowser-reset-button;
+                            color: Theme.text; font-size: 10px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        ta-reset := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.reset-filters(); }
+                        }
+                    }
+                    // "Search" button
+                    Rectangle {
+                        y: 17px;
+                        width: 110px; height: 26px; border-radius: 5px;
+                        background: ta-search.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue;
+                        animate background { duration: 80ms; }
+                        Text {
+                            text: Tr.refbrowser-search-button;
+                            color: Theme.base; font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        ta-search := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.search-games(); }
+                        }
+                    }
+                }
+
+                if root.active-tab == 0: VerticalLayout {
+                    spacing: 10px;
+                    vertical-stretch: 1;
+
+                    // Result counter + active "Opening Tree" filter
+                    // chip (ergonomics follow-up 10/07/2026): the only
+                    // visible trace, in the "Games" tab, that a
+                    // tree-derived selection is applied ON TOP OF the
+                    // classic filters — without it, a user who
+                    // comes back to this tab would have no way to know why
+                    // the list is restricted, or how to undo it.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.total-count + " " + Tr.refbrowser-results-suffix;
+                            color: Theme.overlay0; font-size: 10px;
+                            vertical-alignment: center;
+                        }
+                        if root.tree-filter-active: Rectangle {
+                            width: 260px; height: 20px;
+                            border-radius: 10px;
+                            background: Theme.blue.with-alpha(0.15);
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 6px;
+                                Text {
+                                    text: root.tree-filter-label;
+                                    color: Theme.blue; font-size: 9px; font-weight: 700;
+                                    vertical-alignment: center; overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                Rectangle {
+                                    width: 14px; height: 14px;
+                                    y: (parent.height - self.height) / 2;
+                                    Path {
+                                        width: 8px; height: 8px;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        commands: "M1 1 L7 7 M7 1 L1 7";
+                                        viewbox-x: 0; viewbox-y: 0; viewbox-width: 8; viewbox-height: 8;
+                                        stroke: Theme.blue;
+                                        stroke-width: 1.3px;
+                                    }
+                                    ta-chip-clear := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.tree-filter-clear(); }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+
+                    // Column headers
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px;
+                        spacing: 4px;
+                        Text { text: Tr.refbrowser-col-white; horizontal-stretch: 2; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                        Text { text: Tr.refbrowser-col-black; horizontal-stretch: 2; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                        Text { text: Tr.refbrowser-col-result; width: 70px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                        Text { text: Tr.refbrowser-col-elo;    width: 110px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                        Text { text: Tr.refbrowser-col-date;   width: 90px; horizontal-alignment: center; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                        Text { text: Tr.refbrowser-col-opening; width: 220px; color: Theme.overlay0; font-size: 10px; font-weight: 700; }
+                    }
+                    Rectangle { height: 1px; background: Theme.surface0; }
+
+                    // Scrollable results list
+                    if root.games.length == 0: Rectangle {
+                        vertical-stretch: 1;
+                        Text {
+                            text: Tr.refbrowser-no-results;
+                            color: Theme.overlay0; font-size: 11px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                    }
+                    if root.games.length > 0: ListView {
+                        vertical-stretch: 1;
+
+                        for g in root.games: Rectangle {
+                            height: 36px;
+                            background: ta-row.has-hover ? Theme.hover : transparent;
+                            animate background { duration: 80ms; }
+
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 8px;
+                                spacing: 4px;
+                                Text {
+                                    text: g.white; horizontal-stretch: 2;
+                                    color: Theme.text; font-size: 11px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                Text {
+                                    text: g.black; horizontal-stretch: 2;
+                                    color: Theme.text; font-size: 11px;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                Text {
+                                    text: g.result; width: 70px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    color: Theme.text; font-size: 11px;
+                                }
+                                Text {
+                                    text: g.white-elo + " / " + g.black-elo; width: 110px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    color: Theme.overlay0; font-size: 10px;
+                                }
+                                Text {
+                                    text: g.date; width: 90px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    color: Theme.overlay0; font-size: 10px;
+                                }
+                                Text {
+                                    text: g.eco == "" ? "" : g.eco + (g.opening == "" ? "" : " — " + g.opening);
+                                    width: 220px;
+                                    vertical-alignment: center; overflow: elide;
+                                    color: Theme.overlay0; font-size: 10px;
+                                }
+                            }
+
+                            ta-row := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.game-selected(g.id); }
+                            }
+                        }
+                    }
+
+                    // ── Pagination ─────────────────────────────────────
+                    if root.total-count > 0: HorizontalLayout {
+                        alignment: center; spacing: 18px;
+
+                        Rectangle {
+                            width: 90px; height: 22px;
+                            Text {
+                                text: Tr.refbrowser-prev-page;
+                                color: root.page > 0 ? Theme.text : Theme.surface1;
+                                font-size: 11px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                width: parent.width; height: parent.height;
+                            }
+                            ta-prev := TouchArea {
+                                mouse-cursor: root.page > 0 ? pointer : default;
+                                clicked => {
+                                    if (root.page > 0) {
+                                        root.go-to-page(root.page - 1);
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            text: Tr.refbrowser-page-label + " " + (root.page + 1) + " / " + root.total-pages;
+                            color: Theme.overlay0; font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle {
+                            width: 90px; height: 22px;
+                            Text {
+                                text: Tr.refbrowser-next-page;
+                                color: root.page + 1 < root.total-pages ? Theme.text : Theme.surface1;
+                                font-size: 11px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                                width: parent.width; height: parent.height;
+                            }
+                            ta-next := TouchArea {
+                                mouse-cursor: root.page + 1 < root.total-pages ? pointer : default;
+                                clicked => {
+                                    if (root.page + 1 < root.total-pages) {
+                                        root.go-to-page(root.page + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

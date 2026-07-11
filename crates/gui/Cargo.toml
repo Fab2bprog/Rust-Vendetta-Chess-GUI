@@ -1,0 +1,62 @@
+[package]
+name = "gui"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+# Binary artifact name decoupled from the crate name above: the crate stays
+# "gui" (idiomatic snake_case, used internally for workspace path
+# dependencies), but the compiled executable that users actually run is
+# named "vendetta-chess-gui" — clearer than a bare "gui" on the command
+# line or in a file listing.
+[[bin]]
+name = "vendetta-chess-gui"
+path = "src/main.rs"
+
+[dependencies]
+# ATTENTION : ne pas écrire `core = { path = "../core" }` !
+# Le nom "core" est réservé par la stdlib Rust (::core::pin, ::core::result…).
+# Le code généré par Slint utilise ::core et serait cassé par ce conflit de noms.
+# Les types chess sont importés via le renommage "chess_core" (Phase 6.5+) :
+chess_core  = { path = "../core", package = "core" }
+i18n        = { path = "../i18n" }
+game_config = { path = "../game_config" }
+tournament  = { path = "../tournament" }
+db          = { path = "../db" }
+app_paths   = { path = "../app_paths" }
+slint       = "1"
+uci         = { path = "../uci" }
+rfd         = "0.15"
+arboard     = "3"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+# PHASE 25 — impression PDF de la partie : dessin vectoriel (échiquier,
+# tableau des coups) + embarquement direct des SVG de pièces déjà présents
+# dans assets/pieces/ (feature "svg", cf. crates/gui/src/pdf_export.rs).
+printpdf    = { version = "0.7", features = ["svg"] }
+# PHASE 76 — export PNG de l'échiquier : rastérisation des SVG de pièces
+# (déjà embarqués pour l'export PDF) via `resvg`, qui ré-exporte directement
+# `tiny_skia`/`usvg` (confirmé via docs.rs/resvg/0.47.0) — un seul ajout de
+# dépendance suffit, pas besoin de déclarer tiny-skia/usvg séparément.
+resvg       = "0.47"
+
+[build-dependencies]
+slint-build = "1"
+
+# Métadonnées pour `cargo bundle --release` (crate `cargo-bundle`, à installer
+# une fois avec `cargo install cargo-bundle`). Génère un vrai bundle macOS
+# VendettaChess.app (Contents/MacOS/Info.plist) au lieu de l'exécutable brut :
+# c'est l'exécutable brut, sans bundle, qui fait que Finder l'ouvre dans une
+# fenêtre Terminal au double-clic. Voir SUIVI_PLAN_ACTION.md pour la procédure
+# de build complète (Windows + macOS).
+[package.metadata.bundle]
+name = "Vendetta Chess"
+identifier = "com.fabrice.vendetta-chess-gui"
+copyright = "Copyright (c) 2026 Fabrice"
+category = "public.app-category.board-games"
+short_description = "Interface graphique d'échecs de niveau professionnel"
+long_description = "Vendetta Chess GUI : plateau interactif, horloges, moteurs UCI, tournois, puzzles, annotations PGN et export PDF."
+# Pas d'icône dédiée pour l'instant : cargo-bundle utilisera l'icône
+# générique macOS. Ajouter un champ icon = ["assets/icon.icns"] ici dès
+# qu'une icône .icns est disponible.

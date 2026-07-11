@@ -1,0 +1,8 @@
+[build]
+rustflags = [
+    "-D", "warnings",           # Toute warning = erreur de compilation
+]
+
+[alias]
+lint = "clippy --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -A clippy::module_name_repetitions"
+fmt-check = "fmt --all -- --check"

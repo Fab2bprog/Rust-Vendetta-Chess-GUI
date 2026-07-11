@@ -1,0 +1,65 @@
+// types.slint — Structures shared across several .slint files.
+// Imported by game_setup.slint, preferences.slint and app.slint.
+
+/// A saved UCI engine (display name + path to the executable).
+///
+/// PHASE 73: `path` is now **relative** to `VendettaChess/` (an engine
+/// always goes through `moteurs/`, either copied on import or already
+/// present for auto-detection — absolute paths are never needed on the UI
+/// side). Used both for display (Preferences), for selection (New Game
+/// wizard) and for identity comparisons (the "hint engine" dropdown).
+/// Resolution to an absolute path (needed to actually launch the process)
+/// only happens at the very last moment on the Rust side, in
+/// `GameBridge::init` (`game_bridge.rs`) — never exposed to the UI.
+export struct SavedEngine {
+    name: string,
+    path: string,
+}
+
+/// A row of the standings in the tournament panel.
+///
+/// All fields are strings pre-formatted by Rust to simplify Slint
+/// rendering (avoids int→string conversions in the UI).
+export struct TournamentStanding {
+    rank:   string,  // e.g. "#1"
+    name:   string,  // engine name
+    score:  string,  // e.g. "2.5"
+    wins:   string,  // e.g. "2"
+    draws:  string,  // e.g. "1"
+    losses: string,  // e.g. "0"
+}
+
+/// A Multi-PV analysis line.
+///
+/// rank  : line number (1 = main line, 2, 3…)
+/// score : formatted score (e.g. "+0.50", "M3", "—")
+/// depth : depth (e.g. "18")
+/// pv    : UCI move sequence (e.g. "e2e4 e7e5 g1f3")
+export struct PvLine {
+    rank:  int,
+    score: string,
+    depth: string,
+    pv:    string,
+}
+
+/// A UCI option exposed by an engine (Preferences panel → engine config).
+///
+/// kind    : "spin" | "check" | "string" | "combo" | "button"
+/// value   : current value (modified by the user, or = default)
+/// default : default value declared by the engine
+/// min/max : bounds for spin (ignored for other types)
+/// vars    : valid values for combo, separated by "|" (e.g. "Classic|Score")
+/// invalid : PHASE 57 — true if "Validate" detected a non-numeric "spin"
+///           entry and reset it to its default value (shown in red
+///           in `EngineOptionsDialog`). Always false outside of that case.
+export struct UciOptionItem {
+    name:     string,
+    kind:     string,
+    value:    string,
+    default:  string,
+    min:      int,
+    max:      int,
+    vars:     string,
+    priority: bool,    // true = displayed directly (Threads, Hash, MultiPV…)
+    invalid:  bool,
+}

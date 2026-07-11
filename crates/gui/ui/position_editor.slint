@@ -1,0 +1,569 @@
+// FEN position editor — Phase 12.
+//
+// Full-screen overlay allowing any starting position to be built
+// piece by piece.
+//
+// Usage:
+//   1. Select a piece in the palette (or the eraser).
+//   2. Click a board square → Rust updates editor-squares.
+//   3. Set the side to move, castling rights and en passant.
+//   4. "Validate"          → validate() callback        → Rust generates the FEN and starts the game.
+//   5. "Starting position" → reset-position() callback  → Rust restores the starting position.
+//   6. "Cancel"            → cancel() callback           → returns without changes.
+//
+// Techniques:
+//   - TouchArea used as the root element of each square/palette button:
+//     child elements read `parent.has-hover` for hover state, without
+//     needing to name the element (names inside `for` loops are not
+//     reliable depending on the Slint version).
+//   - All computed expressions use `root.` to remove any Slint
+//     scoping ambiguity.
+//   - board-sz and sq are properties of the component root, accessible
+//     via `root.board-sz` / `root.sq` from nested child elements.
+
+import { Theme }      from "theme.slint";
+import { SquareData } from "board.slint";
+import { Tr }         from "translations.slint";
+import { TooltipIconButton } from "tooltip_icon_button.slint";
+
+export component PositionEditor inherits Rectangle {
+
+    // ── Editor board data ────────────────────────────────────────────
+    /// 64 squares (row 0..7, col 0..7). Only piece-char and is-light are used.
+    in     property <[SquareData]> editor-squares;
+    /// Orientation: true = White at the top (mirror of the main board).
+    in     property <bool>         flipped: false;
+
+    // ── Palette selection ─────────────────────────────────────────────────────
+    /// Active piece identifier: "wK".."bP", "eraser", or "" (none).
+    in-out property <string> selected-piece-id: "";
+
+    // ── Position options ───────────────────────────────────────────────────
+    in-out property <bool> white-to-move: true;
+    in-out property <bool> castle-wk:    true;   // White kingside castling
+    in-out property <bool> castle-wq:    true;   // White queenside castling
+    in-out property <bool> castle-bk:    true;   // Black kingside castling
+    in-out property <bool> castle-bq:    true;   // Black queenside castling
+
+    // ── Wizard mode ──────────────────────────────────────────────────────────────
+    /// true = opened from the New Game wizard.
+    /// The "Validate" button becomes "✓ Use this position" and returns the FEN
+    /// to the wizard instead of directly starting a game.
+    in property <bool> wizard-mode: false;
+
+    // ── Callbacks to Rust ───────────────────────────────────────────────────
+    callback square-clicked(int, int);  // row, col
+    callback validate();
+    callback reset-position();
+    callback clear-board();             // clears all squares
+    callback cancel();
+    // Ergonomics follow-up 10/07/2026 — 3 buttons "identical (same principle)" to
+    // the ones in the main window, applied to the position currently being
+    // built in the editor (not to a game that might be in progress).
+    callback export-board-png();
+    callback copy-fen();
+    callback paste-fen();
+
+    // ── Dynamic sizing ─────────────────────────────────────────────
+    // board-sz = available space minus the right panel (220px) and margins.
+    // Minimum 200px for small windows.
+    property <length> board-sz:
+        max(200px, min(root.height - 120px, root.width - 272px));
+    property <length> sq: root.board-sz / 8;
+
+    // ── Background ──────────────────────────────────────────────────────────────
+    background: Theme.base;
+
+    // ── Piece SVG images ─────────────────────────────────────────────────────
+    // Same relative path as board.slint (both files are in ui/).
+    property <image> img-wK: @image-url("../assets/pieces/wK.svg");
+    property <image> img-wQ: @image-url("../assets/pieces/wQ.svg");
+    property <image> img-wR: @image-url("../assets/pieces/wR.svg");
+    property <image> img-wB: @image-url("../assets/pieces/wB.svg");
+    property <image> img-wN: @image-url("../assets/pieces/wN.svg");
+    property <image> img-wP: @image-url("../assets/pieces/wP.svg");
+    property <image> img-bK: @image-url("../assets/pieces/bK.svg");
+    property <image> img-bQ: @image-url("../assets/pieces/bQ.svg");
+    property <image> img-bR: @image-url("../assets/pieces/bR.svg");
+    property <image> img-bB: @image-url("../assets/pieces/bB.svg");
+    property <image> img-bN: @image-url("../assets/pieces/bN.svg");
+    property <image> img-bP: @image-url("../assets/pieces/bP.svg");
+
+    // ── Main layout ──────────────────────────────────────────────────────────
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // ── Title ─────────────────────────────────────────────────────────────
+        Text {
+            text: Tr.posedit-title;
+            font-size: 17px;
+            font-weight: 700;
+            color: Theme.text;
+            horizontal-alignment: center;
+        }
+
+        // ── Central area: board on the left, options on the right ────────────────
+        HorizontalLayout {
+            spacing: 20px;
+            alignment: center;
+
+            // ── Editor board ───────────────────────────────────────────────
+            // Container Rectangle (clip + shadow). The 64 squares are positioned
+            // absolutely inside it via x/y computed from row/col.
+            Rectangle {
+                width:  root.board-sz;
+                height: root.board-sz;
+                clip: true;
+                drop-shadow-blur: 6px;
+                drop-shadow-color: Theme.shadow;
+
+                // ── Squares (for loop) ──────────────────────────────────────────
+                // TouchArea as the root element → parent.has-hover usable
+                // in children without naming the element.
+                for sqd in root.editor-squares: TouchArea {
+                    x: root.flipped ? root.sq * (7 - sqd.col) : root.sq * sqd.col;
+                    y: root.flipped ? root.sq * (7 - sqd.row) : root.sq * sqd.row;
+                    width:  root.sq;
+                    height: root.sq;
+
+                    // Piece image — computed locally (TouchArea property)
+                    property <image> sq-img:
+                        sqd.piece-char == "wK" ? root.img-wK :
+                        sqd.piece-char == "wQ" ? root.img-wQ :
+                        sqd.piece-char == "wR" ? root.img-wR :
+                        sqd.piece-char == "wB" ? root.img-wB :
+                        sqd.piece-char == "wN" ? root.img-wN :
+                        sqd.piece-char == "wP" ? root.img-wP :
+                        sqd.piece-char == "bK" ? root.img-bK :
+                        sqd.piece-char == "bQ" ? root.img-bQ :
+                        sqd.piece-char == "bR" ? root.img-bR :
+                        sqd.piece-char == "bB" ? root.img-bB :
+                        sqd.piece-char == "bN" ? root.img-bN :
+                        root.img-bP;  // fallback (empty square → Image.visible = false)
+
+                    clicked => { root.square-clicked(sqd.row, sqd.col); }
+
+                    // Square background
+                    Rectangle {
+                        width: parent.width; height: parent.height;
+                        background: sqd.is-light ? #f0d9b5 : #b58863;
+                    }
+
+                    // SVG piece
+                    Image {
+                        visible:    sqd.piece-char != "";
+                        source:     sq-img;
+                        width:      parent.width  * 0.88;
+                        height:     parent.height * 0.88;
+                        x: (parent.width  - self.width)  / 2;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                    }
+
+                    // Hover overlay (visible only when a piece/eraser is active)
+                    Rectangle {
+                        width: parent.width; height: parent.height;
+                        background: #ffffff;
+                        opacity: parent.has-hover && root.selected-piece-id != "" ? 0.24 : 0.0;
+                        animate opacity { duration: 60ms; }
+                    }
+                }
+            }
+
+            // ── Options panel (fixed 220px) ──────────────────────────────────
+            VerticalLayout {
+                width: 220px;
+                spacing: 10px;
+                alignment: start;
+
+                // ── White palette ────────────────────────────────────────────
+                Text {
+                    text: Tr.board-white;
+                    font-size: 10px; font-weight: 600;
+                    color: Theme.subtext0;
+                }
+                HorizontalLayout {
+                    spacing: 3px;
+                    for pid in ["wK", "wQ", "wR", "wB", "wN", "wP"]: TouchArea {
+                        width: 33px; height: 33px;
+                        clicked => { root.selected-piece-id = pid; }
+
+                        property <image> pimg:
+                            pid == "wK" ? root.img-wK :
+                            pid == "wQ" ? root.img-wQ :
+                            pid == "wR" ? root.img-wR :
+                            pid == "wB" ? root.img-wB :
+                            pid == "wN" ? root.img-wN :
+                            root.img-wP;
+
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            background: root.selected-piece-id == pid
+                                ? Theme.blue.with-alpha(0.30)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.selected-piece-id == pid ? 2px : 0px;
+                            border-color: Theme.blue;
+
+                            Image {
+                                source: pimg;
+                                width: 26px; height: 26px;
+                                x: (parent.width  - self.width)  / 2;
+                                y: (parent.height - self.height) / 2;
+                                image-fit: contain;
+                            }
+                        }
+                    }
+                }
+
+                // ── Black palette ─────────────────────────────────────────────
+                Text {
+                    text: Tr.board-black;
+                    font-size: 10px; font-weight: 600;
+                    color: Theme.subtext0;
+                }
+                HorizontalLayout {
+                    spacing: 3px;
+                    for pid in ["bK", "bQ", "bR", "bB", "bN", "bP"]: TouchArea {
+                        width: 33px; height: 33px;
+                        clicked => { root.selected-piece-id = pid; }
+
+                        property <image> pimg:
+                            pid == "bK" ? root.img-bK :
+                            pid == "bQ" ? root.img-bQ :
+                            pid == "bR" ? root.img-bR :
+                            pid == "bB" ? root.img-bB :
+                            pid == "bN" ? root.img-bN :
+                            root.img-bP;
+
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            background: root.selected-piece-id == pid
+                                ? Theme.blue.with-alpha(0.30)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.selected-piece-id == pid ? 2px : 0px;
+                            border-color: Theme.blue;
+
+                            Image {
+                                source: pimg;
+                                width: 26px; height: 26px;
+                                x: (parent.width  - self.width)  / 2;
+                                y: (parent.height - self.height) / 2;
+                                image-fit: contain;
+                            }
+                        }
+                    }
+                }
+
+                // ── Eraser + Clear all ──────────────────────────────────────
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    // Eraser (square by square)
+                    TouchArea {
+                        width: 50%; height: 28px;
+                        clicked => { root.selected-piece-id = "eraser"; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            background: root.selected-piece-id == "eraser"
+                                ? Theme.red.with-alpha(0.22)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.selected-piece-id == "eraser" ? 2px : 0px;
+                            border-color: Theme.red;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
+                                Path {
+                                    width: 9px; height: 9px;
+                                    commands: "M1 1 L9 9 M9 1 L1 9";
+                                    viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                                    stroke: root.selected-piece-id == "eraser" ? Theme.red : Theme.text;
+                                    stroke-width: 1.4px;
+                                }
+                                Text {
+                                    text: Tr.posedit-eraser;
+                                    color: root.selected-piece-id == "eraser"
+                                        ? Theme.red : Theme.text;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+
+                    // Clear the whole board
+                    TouchArea {
+                        width: 50%; height: 28px;
+                        clicked => { root.clear-board(); }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            // parent = TouchArea here → has-hover available.
+                            property <bool> hovered: parent.has-hover;
+                            background: hovered ? Theme.red.with-alpha(0.18) : Theme.surface0;
+                            Text {
+                                text: "⊠ " + Tr.posedit-clear-all;
+                                // parent = Rectangle → use parent.hovered (not has-hover)
+                                color: parent.hovered ? Theme.red : Theme.subtext0;
+                                font-size: 11px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ── Side to move ─────────────────────────────────────────────────────
+                Text {
+                    text: Tr.posedit-turn-label;
+                    font-size: 10px; font-weight: 600;
+                    color: Theme.subtext0;
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    // White
+                    TouchArea {
+                        width: 108px; height: 28px;
+                        clicked => { root.white-to-move = true; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            background: root.white-to-move
+                                ? Theme.blue.with-alpha(0.30)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.white-to-move ? 2px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-white;
+                                color: Theme.text; font-size: 11px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Black
+                    TouchArea {
+                        width: 108px; height: 28px;
+                        clicked => { root.white-to-move = false; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 5px;
+                            background: !root.white-to-move
+                                ? Theme.blue.with-alpha(0.30)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: !root.white-to-move ? 2px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-black;
+                                color: Theme.text; font-size: 11px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ── Castling rights ───────────────────────────────────────────
+                Text {
+                    text: Tr.posedit-castling-rights;
+                    font-size: 10px; font-weight: 600;
+                    color: Theme.subtext0;
+                }
+                // Row 1: White
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    TouchArea {
+                        width: 108px; height: 24px;
+                        clicked => { root.castle-wk = !root.castle-wk; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 4px;
+                            background: root.castle-wk
+                                ? Theme.blue.with-alpha(0.22)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.castle-wk ? 1px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-white + "  O-O";
+                                color: Theme.text; font-size: 10px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    TouchArea {
+                        width: 108px; height: 24px;
+                        clicked => { root.castle-wq = !root.castle-wq; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 4px;
+                            background: root.castle-wq
+                                ? Theme.blue.with-alpha(0.22)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.castle-wq ? 1px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-white + "  O-O-O";
+                                color: Theme.text; font-size: 10px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                // Row 2: Black
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    TouchArea {
+                        width: 108px; height: 24px;
+                        clicked => { root.castle-bk = !root.castle-bk; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 4px;
+                            background: root.castle-bk
+                                ? Theme.blue.with-alpha(0.22)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.castle-bk ? 1px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-black + "  O-O";
+                                color: Theme.text; font-size: 10px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    TouchArea {
+                        width: 108px; height: 24px;
+                        clicked => { root.castle-bq = !root.castle-bq; }
+                        Rectangle {
+                            width: parent.width; height: parent.height;
+                            border-radius: 4px;
+                            background: root.castle-bq
+                                ? Theme.blue.with-alpha(0.22)
+                                : (parent.has-hover ? Theme.hover : Theme.surface0);
+                            border-width: root.castle-bq ? 1px : 0px;
+                            border-color: Theme.blue;
+                            Text {
+                                text: Tr.board-black + "  O-O-O";
+                                color: Theme.text; font-size: 10px;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                // ── Actions: PNG / copy-paste FEN (ergonomics follow-up
+                // 10/07/2026) — act on the position currently being
+                // built in the editor, not on a game that might be
+                // in progress. Direct reuse of `TooltipIconButton` and
+                // the same tooltips as the main window.
+                HorizontalLayout {
+                    height: 32px;
+                    spacing: 6px;
+
+                    TooltipIconButton {
+                        height: 32px;
+                        icon-text: "📸"; icon-size: 15px;
+                        tooltip-text: Tr.tooltip-export-board-png;
+                        clicked => { root.export-board-png(); }
+                    }
+                    TooltipIconButton {
+                        height: 32px;
+                        icon-text: "📋"; icon-size: 13px;
+                        tooltip-text: Tr.tooltip-copy-fen;
+                        clicked => { root.copy-fen(); }
+                    }
+                    TooltipIconButton {
+                        height: 32px;
+                        icon-text: "📥"; icon-size: 13px;
+                        tooltip-text: Tr.tooltip-paste-fen;
+                        clicked => { root.paste-fen(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+        }
+
+        // ── Button bar ──────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+            padding-top: 4px;
+
+            // Starting position
+            TouchArea {
+                width: 165px; height: 34px;
+                clicked => { root.reset-position(); }
+                Rectangle {
+                    width: parent.width; height: parent.height;
+                    border-radius: 6px;
+                    background: parent.has-hover ? Theme.hover : Theme.surface0;
+                    border-width: 1px; border-color: Theme.surface1;
+                    Text {
+                        text: "↺  " + Tr.posedit-reset-position;
+                        color: Theme.text; font-size: 12px;
+                        width: parent.width; height: parent.height;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Cancel
+            TouchArea {
+                width: 110px; height: 34px;
+                clicked => { root.cancel(); }
+                Rectangle {
+                    width: parent.width; height: parent.height;
+                    border-radius: 6px;
+                    // `parent` here = TouchArea → has-hover available.
+                    // `hovered` is exposed so children (Text) can access it
+                    // via `parent.hovered` without having to go up two levels.
+                    property <bool> hovered: parent.has-hover;
+                    background: hovered ? Theme.red.with-alpha(0.18) : Theme.surface0;
+                    border-width: 1px;
+                    border-color: hovered ? Theme.red : Theme.surface1;
+                    Text {
+                        text: Tr.btn-cancel;
+                        color: parent.hovered ? Theme.red : Theme.text;
+                        font-size: 12px;
+                        width: parent.width; height: parent.height;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Validate / Use this position (wizard-mode)
+            TouchArea {
+                width: root.wizard-mode ? 200px : 130px; height: 34px;
+                clicked => { root.validate(); }
+                Rectangle {
+                    width: parent.width; height: parent.height;
+                    border-radius: 6px;
+                    // Catppuccin green : Mocha #a6e3a1 / Latte #40a02b
+                    background: Theme.is-dark
+                        ? (parent.has-hover ? #b8f0b2 : #a6e3a1)
+                        : (parent.has-hover ? #4db035 : #40a02b);
+                    Text {
+                        text: root.wizard-mode ? ("✓  " + Tr.posedit-btn-use-position) : ("✓  " + Tr.posedit-btn-validate);
+                        color: #1e1e2e;
+                        font-size: 12px; font-weight: 700;
+                        width: parent.width; height: parent.height;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+}

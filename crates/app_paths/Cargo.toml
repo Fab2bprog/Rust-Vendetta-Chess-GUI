@@ -1,0 +1,11 @@
+[package]
+name = "app_paths"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

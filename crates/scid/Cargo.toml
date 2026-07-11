@@ -1,0 +1,15 @@
+[package]
+name = "scid"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+# ATTENTION : ne pas écrire `core = { path = "../core" }` !
+# Le nom "core" est réservé par la stdlib Rust (::core::pin, ::core::result…).
+# Les types chess sont importés via le renommage "chess_core" (même convention
+# que crates/gui, voir crates/gui/Cargo.toml) :
+chess_core = { path = "../core", package = "core" }
+
+[dev-dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "i18n"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+toml = "0.8"

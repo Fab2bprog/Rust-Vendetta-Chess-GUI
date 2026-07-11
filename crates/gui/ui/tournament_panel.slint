@@ -1,0 +1,208 @@
+// tournament_panel.slint — Tournament standings panel (Phase 9.5)
+//
+// Replaces the right sidebar panel when `is-tournament-mode = true`.
+// Shows: progress, current game, W/D/L standings, Stop button.
+// When `finished = true`, the button turns into "Close".
+
+import { Theme } from "theme.slint";
+import { TournamentStanding } from "types.slint";
+import { Tr } from "translations.slint";
+
+export component TournamentPanel {
+    // ── Incoming data ─────────────────────────────────────────────────────
+    in property <[TournamentStanding]> standings:     [];
+    in property <string>  current-white:  "";
+    in property <string>  current-black:  "";
+    in property <int>     games-played:   0;
+    in property <int>     total-games:    0;
+    in property <float>   progress:       0.0;
+    in property <bool>    finished:       false;
+
+    // ── Callbacks ─────────────────────────────────────────────────────────────
+    /// Stop the current tournament, or close the panel if finished.
+    callback stop-tournament();
+
+    // ── Layout ────────────────────────────────────────────────────────────────
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        // ── Title ─────────────────────────────────────────────────────────────
+        Text {
+            text: root.finished ? Tr.tournament-finished-title : Tr.tournament-in-progress-title;
+            color: root.finished ? Theme.blue : Theme.text;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        // ── Progress ───────────────────────────────────────────────────────
+        Rectangle {
+            height: 40px;
+            background: Theme.surface0;
+            border-radius: 6px;
+            drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+            drop-shadow-color: Theme.shadow;
+
+            VerticalLayout {
+                padding-left: 10px; padding-right: 10px;
+                padding-top: 6px; padding-bottom: 6px;
+                spacing: 4px;
+                alignment: start;
+
+                Text {
+                    text: "\{root.games-played} / \{root.total-games} " + Tr.tournament-games-played-suffix;
+                    color: Theme.subtext0;
+                    font-size: 10px;
+                }
+
+                // Progress bar
+                Rectangle {
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.surface1;
+                    Rectangle {
+                        x: 0; y: 0; height: 4px; border-radius: 2px;
+                        background: Theme.blue;
+                        width: parent.width * root.progress;
+                        animate width { duration: 300ms; easing: ease-out; }
+                    }
+                }
+            }
+        }
+
+        // ── Current game ───────────────────────────────────────────────────
+        if !root.finished: Rectangle {
+            height: 42px;
+            background: Theme.base;
+            border-radius: 6px;
+            drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+            drop-shadow-color: Theme.shadow;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                alignment: center;
+
+                Text {
+                    text: root.current-white + "  ⚔  " + root.current-black;
+                    color: Theme.text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: Tr.board-white + "  /  " + Tr.board-black;
+                    color: Theme.overlay0;
+                    font-size: 8.5px;
+                    horizontal-alignment: center;
+                    letter-spacing: 0.5px;
+                }
+            }
+        }
+
+        // ── Standings header ─────────────────────────────────────────────
+        HorizontalLayout {
+            padding-left: 8px; padding-right: 4px;
+
+            Text { text: "#";   width: 18px; color: Theme.overlay0; font-size: 9px; letter-spacing: 0.5px; vertical-alignment: center; }
+            Text { text: Tr.tournament-col-engine; horizontal-stretch: 1; color: Theme.overlay0; font-size: 9px; letter-spacing: 0.5px; vertical-alignment: center; }
+            Text { text: Tr.tournament-col-points; width: 30px; color: Theme.overlay0; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+            Text { text: Tr.tournament-col-wins;   width: 20px; color: Theme.overlay0; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+            Text { text: Tr.tournament-col-draws;  width: 20px; color: Theme.overlay0; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+            Text { text: Tr.tournament-col-losses; width: 20px; color: Theme.overlay0; font-size: 9px; horizontal-alignment: right; vertical-alignment: center; }
+        }
+
+        // ── Standings rows ──────────────────────────────────────────────
+        for s[idx] in root.standings: Rectangle {
+            height: 28px;
+            background: idx == 0 ? Theme.surface0 : Theme.base;
+            border-radius: 4px;
+            // Blue border for the leader once the tournament is finished
+            border-width: idx == 0 && root.finished ? 1px : 0px;
+            border-color: Theme.blue;
+
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 4px;
+
+                Text {
+                    text: s.rank;
+                    width: 18px;
+                    color: idx == 0 ? Theme.blue : Theme.overlay1;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: s.name;
+                    horizontal-stretch: 1;
+                    color: idx == 0 ? Theme.blue : Theme.text;
+                    font-size: 11px;
+                    font-weight: idx == 0 ? 700 : 400;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: s.score;
+                    width: 30px;
+                    color: Theme.blue;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: s.wins;
+                    width: 20px;
+                    color: Theme.subtext0;
+                    font-size: 10px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: s.draws;
+                    width: 20px;
+                    color: Theme.subtext0;
+                    font-size: 10px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: s.losses;
+                    width: 20px;
+                    color: Theme.subtext0;
+                    font-size: 10px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // ── Spacer ────────────────────────────────────────────────────────────
+        Rectangle { vertical-stretch: 1; }
+
+        // ── Stop / Close button ───────────────────────────────────────────
+        Rectangle {
+            height: 32px;
+            border-radius: 6px;
+            background: ta-stop.has-hover ? Theme.surface1 : Theme.surface0;
+            drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+            drop-shadow-color: Theme.shadow;
+            animate background { duration: 120ms; }
+
+            Text {
+                text: root.finished ? ("✓  " + Tr.btn-close) : ("⏹  " + Tr.tournament-btn-stop);
+                color: ta-stop.has-hover
+                    ? (root.finished ? Theme.blue : Theme.red)
+                    : Theme.subtext0;
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                animate color { duration: 120ms; }
+            }
+
+            ta-stop := TouchArea {
+                clicked => { root.stop-tournament(); }
+            }
+        }
+    }
+}

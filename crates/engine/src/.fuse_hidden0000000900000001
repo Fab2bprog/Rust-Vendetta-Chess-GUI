@@ -1,0 +1,368 @@
+//! Pool de moteurs UCI.
+//!
+//! [`EnginePool`] gère un ensemble de moteurs identifiés par un `String`.
+//! Chaque moteur est connecté, configuré et maintenu actif jusqu'à sa
+//! suppression explicite ou l'arrêt du pool.
+//!
+//! ## Exemple
+//!
+//! ```ignore
+//! let mut pool = EnginePool::new();
+//! let cfg = EngineConfig::new("Vendetta", "/path/to/engine");
+//! pool.add("v1", &cfg)?;
+//!
+//! let engine = pool.get_mut("v1")?;
+//! let result = engine.analyze(&position, &limits)?;
+//! ```
+
+use std::collections::HashMap;
+
+use uci::engine::{EngineError, UciEngine};
+
+use crate::{
+    config::{ConfigError, EngineConfig},
+    handle::EngineHandle,
+};
+
+// ---------------------------------------------------------------------------
+// Erreurs
+// ---------------------------------------------------------------------------
+
+/// Erreur du pool de moteurs.
+#[derive(Debug)]
+pub enum PoolError {
+    /// Un moteur avec cet identifiant est déjà présent dans le pool.
+    DuplicateId(String),
+    /// Aucun moteur ne correspond à cet identifiant.
+    NotFound(String),
+    /// Erreur lors de la connexion ou de la communication avec le moteur.
+    Engine(EngineError),
+    /// La configuration du moteur est invalide (chemin, droits…).
+    Config(ConfigError),
+}
+
+impl std::fmt::Display for PoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateId(id) =>
+                write!(f, "Identifiant déjà utilisé : '{id}'"),
+            Self::NotFound(id) =>
+                write!(f, "Moteur introuvable : '{id}'"),
+            Self::Engine(e) =>
+                write!(f, "Erreur moteur : {e}"),
+            Self::Config(e) =>
+                write!(f, "Configuration invalide : {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PoolError {}
+
+impl From<EngineError> for PoolError {
+    fn from(e: EngineError) -> Self { Self::Engine(e) }
+}
+
+impl From<ConfigError> for PoolError {
+    fn from(e: ConfigError) -> Self { Self::Config(e) }
+}
+
+// ---------------------------------------------------------------------------
+// EnginePool
+// ---------------------------------------------------------------------------
+
+/// Pool de moteurs UCI actifs.
+///
+/// Les moteurs sont stockés dans un [`HashMap`] indexé par un identifiant
+/// libre (choisi par l'appelant). L'ordre d'insertion n'est pas garanti.
+#[derive(Default)]
+pub struct EnginePool {
+    engines: HashMap<String, UciEngine>,
+}
+
+impl std::fmt::Debug for EnginePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnginePool")
+            .field("engine_count", &self.engines.len())
+            .field("ids", &self.ids())
+            .finish()
+    }
+}
+
+impl EnginePool {
+    /// Crée un pool vide.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Connecte un moteur à partir de sa configuration, l'ajoute au pool
+    /// et retourne un [`EngineHandle`] permettant de le référencer.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::DuplicateId`] si `id` est déjà présent.
+    /// - [`PoolError::Config`] si le binaire est invalide ou non exécutable.
+    /// - [`PoolError::Engine`] si la connexion ou le handshake échoue.
+    pub fn add(&mut self, id: impl Into<String>, config: &EngineConfig) -> Result<EngineHandle, PoolError> {
+        let id = id.into();
+        if self.engines.contains_key(&id) {
+            return Err(PoolError::DuplicateId(id));
+        }
+
+        // Valider la config avant d'essayer de lancer le processus.
+        config.validate()?;
+
+        // Connexion + handshake UCI.
+        let path_str = config.path.to_str().unwrap_or_default();
+        let mut engine =
+            UciEngine::connect_with_timeout(path_str, config.init_timeout)?;
+
+        // Appliquer les options UCI.
+        for (name, value) in &config.options {
+            engine.set_option(name, Some(value.as_str()))?;
+        }
+
+        let handle = EngineHandle::new(id.clone(), config);
+        self.engines.insert(id, engine);
+        Ok(handle)
+    }
+
+    /// Envoie `quit` au moteur et le retire du pool.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::NotFound`] si `id` est absent du pool.
+    pub fn remove(&mut self, id: &str) -> Result<(), PoolError> {
+        let engine = self
+            .engines
+            .remove(id)
+            .ok_or_else(|| PoolError::NotFound(id.to_string()))?;
+        engine.quit();
+        Ok(())
+    }
+
+    /// Retourne une référence immuable au moteur identifié par `id`.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::NotFound`] si `id` est absent du pool.
+    pub fn get(&self, id: &str) -> Result<&UciEngine, PoolError> {
+        self.engines
+            .get(id)
+            .ok_or_else(|| PoolError::NotFound(id.to_string()))
+    }
+
+    /// Retourne une référence mutable au moteur identifié par `id`.
+    ///
+    /// # Errors
+    ///
+    /// - [`PoolError::NotFound`] si `id` est absent du pool.
+    pub fn get_mut(&mut self, id: &str) -> Result<&mut UciEngine, PoolError> {
+        self.engines
+            .get_mut(id)
+            .ok_or_else(|| PoolError::NotFound(id.to_string()))
+    }
+
+    /// Retourne `true` si un moteur avec cet identifiant est présent.
+    #[must_use]
+    pub fn contains(&self, id: &str) -> bool {
+        self.engines.contains_key(id)
+    }
+
+    /// Retourne la liste des identifiants des moteurs actifs, triée.
+    #[must_use]
+    pub fn ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.engines.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Nombre de moteurs actifs dans le pool.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.engines.len()
+    }
+
+    /// Retourne `true` si le pool ne contient aucun moteur.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.engines.is_empty()
+    }
+
+    /// Envoie `quit` à tous les moteurs et vide le pool.
+    ///
+    /// Les erreurs individuelles sont ignorées — on essaie de fermer
+    /// proprement chaque moteur même si l'un d'eux ne répond pas.
+    ///
+    /// Chaque moteur est fermé dans son propre thread plutôt qu'en
+    /// séquence : `UciEngine::quit()` peut bloquer jusqu'à ~3 s si le
+    /// moteur ne répond pas (`QUIT_WAIT_TIMEOUT`), donc fermer N moteurs
+    /// lents en série coûterait jusqu'à N×3 s au lieu de ~3 s au total en
+    /// parallèle (audit perf 02/07/2026, point 3).
+    pub fn quit_all(&mut self) {
+        // quit() prend self par valeur → on vide la map pour récupérer
+        // la propriété de chaque UciEngine.
+        let engines = std::mem::take(&mut self.engines);
+        let handles: Vec<_> = engines
+            .into_values()
+            .map(|engine| std::thread::spawn(move || engine.quit()))
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for EnginePool {
+    /// Ferme tous les moteurs à la destruction du pool (en parallèle, voir [`Self::quit_all`]).
+    fn drop(&mut self) {
+        self.quit_all();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn vendetta_path() -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("../../engines/vendetta_chess_motor");
+        p
+    }
+
+    fn vendetta_config(name: &str) -> EngineConfig {
+        EngineConfig::new(name, vendetta_path())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests sans moteur réel (structure du pool)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_is_empty() {
+        let pool = EnginePool::new();
+        assert!(pool.is_empty());
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn test_contains_false_when_empty() {
+        let pool = EnginePool::new();
+        assert!(!pool.contains("v1"));
+    }
+
+    #[test]
+    fn test_get_not_found() {
+        let pool = EnginePool::new();
+        assert!(matches!(pool.get("v1"), Err(PoolError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_get_mut_not_found() {
+        let mut pool = EnginePool::new();
+        assert!(matches!(pool.get_mut("v1"), Err(PoolError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_remove_not_found() {
+        let mut pool = EnginePool::new();
+        assert!(matches!(pool.remove("v1"), Err(PoolError::NotFound(_))));
+    }
+
+    #[test]
+    fn test_add_invalid_path() {
+        let mut pool = EnginePool::new();
+        let cfg = EngineConfig::new("Bad", "/nonexistent/engine");
+        assert!(matches!(pool.add("bad", cfg), Err(PoolError::Config(_))));
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_ids_empty() {
+        let pool = EnginePool::new();
+        assert!(pool.ids().is_empty());
+    }
+
+    #[test]
+    fn test_pool_error_display() {
+        let e1 = PoolError::DuplicateId("v1".to_string());
+        assert!(e1.to_string().contains("v1"));
+        let e2 = PoolError::NotFound("v2".to_string());
+        assert!(e2.to_string().contains("v2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests avec le moteur réel (ignorés si binaire absent)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_add_and_contains() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        assert!(pool.contains("v1"));
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn test_add_duplicate_fails() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        let result = pool.add("v1", vendetta_config("Vendetta2"));
+        assert!(matches!(result, Err(PoolError::DuplicateId(_))));
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn test_add_two_engines() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta-1")).unwrap();
+        pool.add("v2", vendetta_config("Vendetta-2")).unwrap();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.ids(), vec!["v1", "v2"]);
+    }
+
+    #[test]
+    fn test_remove_existing() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        pool.remove("v1").unwrap();
+        assert!(!pool.contains("v1"));
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_get_after_add() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        assert!(pool.get("v1").is_ok());
+    }
+
+    #[test]
+    fn test_quit_all() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("v1", vendetta_config("Vendetta-1")).unwrap();
+        pool.add("v2", vendetta_config("Vendetta-2")).unwrap();
+        pool.quit_all();
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_ids_sorted() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        pool.add("zebra", vendetta_config("Z")).unwrap();
+        pool.add("alpha", vendetta_config("A")).unwrap();
+        assert_eq!(pool.ids(), vec!["alpha", "zebra"]);
+    }
+}

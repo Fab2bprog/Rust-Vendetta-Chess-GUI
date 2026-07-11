@@ -1,0 +1,117 @@
+// Engine evaluation graph — Phase 7.6 (rev 2).
+//
+// Two Bézier curves with semi-transparent fill:
+//   - Green curve  (White advantage): rises above the center line.
+//   - Red curve    (Black advantage): dips below.
+//   - The curves can cross when the advantage switches sides.
+//   - SVG path computed on the Rust side (cubic bézier, horizontal tangents).
+//   - Vertical blue indicator = currently visualized move.
+//
+// Properties imported from main.rs via AppWindow:
+//   white-commands  — SVG commands for the White area (viewbox 1000×100)
+//   black-commands  — SVG commands for the Black area (viewbox 1000×100)
+
+import { Theme } from "theme.slint";
+
+/// A position score normalized in pawns, White's perspective.
+/// Positive = White advantage, negative = Black advantage.
+///
+/// Ergonomics follow-up 10/07/2026 — 4 extra fields, used only by
+/// "Game Detail" (`game_detail.slint`) for the block of textual
+/// info shown below the curve when a move is clicked; the main
+/// board (`app.slint`) still only populates `score`, the 4 new
+/// fields stay at their default value (0 / "" / false / -1) for
+/// this use case.
+export struct ScoreBar {
+    score: float,
+    /// Ready-to-use display of the score (sign + 2 decimals, e.g.
+    /// "+1.25"/"-0.34", or "Mat" for a sentinel score of ±50 pawns) —
+    /// formatted on the Rust side rather than via Slint concatenation, same
+    /// convention as `PvLine.score`/`PvLine.depth` (`types.slint`). Empty
+    /// string = unavailable.
+    score-display: string,
+    /// Search depth reached by the engine for this position
+    /// (0 = unavailable).
+    depth: int,
+    /// Best move suggested by the engine for this position, in
+    /// SAN notation (empty string = unavailable).
+    best-move-san: string,
+    /// `true` if this position was (re)analyzed via "Deepen"
+    /// (long movetime), `false` via "Analyze" (fast) or unavailable.
+    from-deep-pass: bool,
+    /// Quality of the move that LED to this position (comparison with the
+    /// score of the previous position, from the perspective of the player who
+    /// just moved): 0 = Excellent · 1 = Good · 2 = Inaccuracy · 3 = Mistake ·
+    /// 4 = Blunder · -1 = not computable (starting position, or not yet
+    /// analyzed).
+    move-quality: int,
+}
+
+export component ScoreGraph inherits Rectangle {
+    /// Score history (one per analyzed half-move).
+    in property <[ScoreBar]> scores;
+    /// 0-based index in scores[] of the visualized move (-1 = no highlight).
+    in property <int>    current-ply: -1;
+    /// SVG commands for the White curve (viewbox 0 0 1000 100).
+    in property <string> white-commands: "";
+    /// SVG commands for the Black curve (viewbox 0 0 1000 100).
+    in property <string> black-commands: "";
+
+    background: Theme.base;
+    border-radius: 6px;
+    clip: true;
+
+    // ── Background: top half slightly lit (White territory) ─────────
+    Rectangle {
+        width: parent.width;
+        height: parent.height / 2;
+        y: 0px;
+        background: Theme.surface0;
+        opacity: 0.20;
+    }
+
+    // ── White advantage curve (semi-transparent green) ───────────────────────────
+    // Area filled from the center line upward when the score is positive.
+    Path {
+        width:  parent.width;
+        height: parent.height;
+        commands: root.white-commands;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width: 1000; viewbox-height: 100;
+        fill:         #a6e3a1.with-alpha(0.33);   // Catppuccin green, 33% opacity
+        stroke:       #a6e3a1.with-alpha(0.85);   // green, 85% opacity
+        stroke-width: 1.5px;
+    }
+
+    // ── Black advantage curve (semi-transparent red) ───────────────────────────
+    // Area filled from the center line downward when the score is negative.
+    Path {
+        width:  parent.width;
+        height: parent.height;
+        commands: root.black-commands;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width: 1000; viewbox-height: 100;
+        fill:         #f38ba8.with-alpha(0.33);   // Catppuccin red, 33% opacity
+        stroke:       #f38ba8.with-alpha(0.85);   // red, 85% opacity
+        stroke-width: 1.5px;
+    }
+
+    // ── Center line (score = 0) ────────────────────────────────────────────────
+    Rectangle {
+        width:  parent.width;
+        height: 1px;
+        y: (parent.height - self.height) / 2;
+        background: Theme.overlay0;
+        opacity: 0.70;
+    }
+
+    // ── Current move indicator (vertical blue line) ─────────────────────────────
+    if root.current-ply >= 0 && root.scores.length > 0: Rectangle {
+        property <length> bw: root.width / root.scores.length;
+        width:  2px;
+        height: root.height;
+        x: root.current-ply * bw + bw / 2 - 1px;
+        background: Theme.blue;
+        opacity: 0.75;
+    }
+}

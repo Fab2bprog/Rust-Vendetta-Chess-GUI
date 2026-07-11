@@ -1,0 +1,1306 @@
+// ui/game_setup.slint
+// "New Game" wizard (multi-step) + "Replay?" Recap screen
+//
+// Exported components:
+//   GameSetupWizard — full-screen overlay, 2 steps (mode → config)
+//   GameSetupRecap  — full-screen overlay, summary of the last config
+
+import { Theme }       from "theme.slint";
+import { SavedEngine } from "types.slint";
+import { Tr }          from "translations.slint";
+
+// ── Selection card (game mode or color) ───────────────────────────────────
+component SetupCard inherits Rectangle {
+    in property <string> icon;
+    /// Alternative icon as an SVG image (chess piece) — used in
+    /// place of `icon` when `use-icon-image` is true, to avoid
+    /// Unicode chess glyphs (♔/♚) unsupported by some system
+    /// fonts (same SVGs as the board, see `board.slint`).
+    in property <image>  icon-image;
+    in property <bool>   use-icon-image: false;
+    in property <string> label;
+    in property <bool>   selected;
+    callback clicked;
+
+    border-radius: 10px;
+    border-width: 2px;
+    border-color: selected ? Theme.blue : Theme.surface1;
+    background:   selected ? Theme.blue.with-alpha(0.13) : Theme.surface0;
+    animate background   { duration: 130ms; }
+    animate border-color { duration: 130ms; }
+
+    VerticalLayout {
+        alignment: center; spacing: 5px;
+        Rectangle {
+            height: 24px;
+            if !use-icon-image: Text {
+                width: parent.width; height: parent.height;
+                text: icon; font-size: 20px; color: Theme.text;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            if use-icon-image: Image {
+                source: icon-image;
+                width: 22px; height: 22px;
+                x: (parent.width  - self.width)  / 2;
+                y: (parent.height - self.height) / 2;
+                image-fit: contain;
+            }
+        }
+        Text { text: label; color: Theme.text; font-size: 10px; font-weight: 700; horizontal-alignment: center; wrap: word-wrap; }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// ── Time-level button ─────────────────────────────────────────────────
+component LevelBtn inherits Rectangle {
+    in property <string> label;
+    in property <bool>   selected;
+    callback clicked;
+
+    height: 26px;
+    border-radius: 5px;
+    border-width: selected ? 0px : 1px;
+    border-color: Theme.surface1;
+    background:   selected ? Theme.blue : Theme.surface0;
+    animate background { duration: 100ms; }
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: label;
+        color: selected ? #ffffff : Theme.text;
+        font-size: 10px; font-weight: selected ? 700 : 400;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// ── Time control button ───────────────────────────────────────────────
+component TimeControlBtn inherits Rectangle {
+    in property <string> tc-label;   // e.g. "3+2"
+    in property <string> tc-cat;     // e.g. "Blitz"
+    in property <bool>   selected;
+    callback clicked;
+
+    height: 52px;
+    border-radius: 7px;
+    border-width: selected ? 0px : 1px;
+    border-color: Theme.surface1;
+    background: selected ? Theme.blue : (ta.has-hover ? Theme.hover : Theme.surface0);
+    animate background { duration: 100ms; }
+
+    VerticalLayout {
+        alignment: center; spacing: 2px;
+        Text {
+            text: root.tc-label;
+            color: selected ? #ffffff : Theme.text;
+            font-size: 13px; font-weight: 700;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.tc-cat;
+            color: selected ? #ffffffaa : Theme.overlay0;
+            font-size: 9px;
+            horizontal-alignment: center;
+        }
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// ── Engine selection panel ─────────────────────────────────────────────
+//
+// Displays the list of saved engines (prefs).
+// The user clicks an engine to select it.
+// If the list is empty, a message invites the user to go to Preferences.
+component EnginePanel inherits Rectangle {
+    in property  <string>          panel-title;
+    in property  <[SavedEngine]>   available-engines;
+    in-out property <int>          selected-idx: 0;
+    in-out property <int>          time-level: 3;
+    /// `true` = shows the thinking-time selector (Level 1-12).
+    /// `false` = hidden (game clock active, Level is ignored).
+    in property  <bool>            show-level: true;
+
+    /// Triggered when the user selects an engine in the list.
+    callback engine-path-changed(string);
+
+    height: root.show-level ? 234px : 145px;
+    animate height { duration: 180ms; easing: ease-in-out; }
+    background: Theme.surface0;
+    border-radius: 8px;
+
+    VerticalLayout {
+        padding: 10px; spacing: 6px; alignment: start;
+
+        Text {
+            text: root.panel-title;
+            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+            letter-spacing: 0.8px;
+        }
+
+        // ── Empty state: no engine configured ────────────────────────────
+        if root.available-engines.length == 0: Rectangle {
+            height: 62px;
+            background: Theme.mantle;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Theme.surface1;
+
+            Text {
+                width: parent.width - 20px;
+                x: 10px; y: (parent.height - self.height) / 2;
+                text: Tr.wizard-no-engine-configured;
+                color: Theme.overlay0; font-size: 10px;
+                wrap: word-wrap; horizontal-alignment: center;
+            }
+        }
+
+        // ── Engine list (3 max visible, clip) ────────────────────────
+        if root.available-engines.length > 0: Rectangle {
+            // height = up to 3 items × 32px + 2 gaps × 4px, max 104px
+            height: min(root.available-engines.length * 36px, 104px);
+            clip: true;
+
+            VerticalLayout {
+                spacing: 4px;
+                for engine[idx] in root.available-engines: Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: root.selected-idx == idx ? Theme.blue : Theme.surface1;
+                    background: root.selected-idx == idx
+                        ? Theme.blue.with-alpha(0.14)
+                        : (ta-e.has-hover ? Theme.hover : Theme.mantle);
+                    animate background, border-color { duration: 100ms; }
+
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 6px;
+                        spacing: 6px; alignment: start;
+
+                        Text {
+                            text: engine.name;
+                            color: root.selected-idx == idx ? Theme.blue : Theme.text;
+                            font-size: 11px;
+                            font-weight: root.selected-idx == idx ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        if root.selected-idx == idx: Text {
+                            text: "✓";
+                            color: Theme.blue; font-size: 11px; font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    ta-e := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.selected-idx = idx;
+                            root.engine-path-changed(engine.path);
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.show-level: HorizontalLayout {
+            Text { text: Tr.wizard-step1-time-title; color: Theme.overlay0; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; vertical-alignment: center; }
+        }
+
+        // 12 levels, sorted by increasing duration, on two rows of 6
+        // (see TimeControl::level_movetime_ms for the full table).
+        if root.show-level: VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 3px;
+                LevelBtn { horizontal-stretch: 1; label: "0.1s"; selected: root.time-level == 1; clicked => { root.time-level = 1; } }
+                LevelBtn { horizontal-stretch: 1; label: "0.5s"; selected: root.time-level == 2; clicked => { root.time-level = 2; } }
+                LevelBtn { horizontal-stretch: 1; label: "1s";   selected: root.time-level == 3; clicked => { root.time-level = 3; } }
+                LevelBtn { horizontal-stretch: 1; label: "1.5s"; selected: root.time-level == 4; clicked => { root.time-level = 4; } }
+                LevelBtn { horizontal-stretch: 1; label: "3s";   selected: root.time-level == 5; clicked => { root.time-level = 5; } }
+                LevelBtn { horizontal-stretch: 1; label: "5s";   selected: root.time-level == 6; clicked => { root.time-level = 6; } }
+            }
+            HorizontalLayout {
+                spacing: 3px;
+                LevelBtn { horizontal-stretch: 1; label: "15s";   selected: root.time-level == 7;  clicked => { root.time-level = 7;  } }
+                LevelBtn { horizontal-stretch: 1; label: "30s";   selected: root.time-level == 8;  clicked => { root.time-level = 8;  } }
+                LevelBtn { horizontal-stretch: 1; label: "1 min"; selected: root.time-level == 9;  clicked => { root.time-level = 9;  } }
+                LevelBtn { horizontal-stretch: 1; label: "2 min"; selected: root.time-level == 10; clicked => { root.time-level = 10; } }
+                LevelBtn { horizontal-stretch: 1; label: "3 min"; selected: root.time-level == 11; clicked => { root.time-level = 11; } }
+                LevelBtn { horizontal-stretch: 1; label: "5 min"; selected: root.time-level == 12; clicked => { root.time-level = 12; } }
+            }
+        }
+    }
+}
+
+// ── Time control + time handicap selector ─────────────────────────────────
+//
+// Component reused in the 3 wizard branches (H vs H / H vs M / M vs M).
+// Includes the preset buttons AND the handicap section (⚖ toggle + min spin).
+component CadencePicker inherits VerticalLayout {
+    // Selected time control: 0=Unlimited  1..7 = timed presets
+    in-out property <int>  game-tc-idx:    0;
+    // Handicap: both sides have different starting times
+    in-out property <bool> handicap-mode:  false;
+    in-out property <int>  white-time-min: 5;
+    in-out property <int>  black-time-min: 5;
+
+    // Preset time in minutes — used by the ↺ reset button
+    private property <int> preset-min:
+        game-tc-idx == 1 ? 1
+      : game-tc-idx == 2 ? 2
+      : game-tc-idx == 3 ? 3
+      : game-tc-idx == 4 ? 5
+      : game-tc-idx == 5 ? 10
+      : game-tc-idx == 6 ? 15
+      : game-tc-idx == 7 ? 90
+      : 5;
+
+    spacing: 8px;
+    alignment: start;
+
+    Text {
+        text: Tr.wizard-step1-cadence-title;
+        color: Theme.overlay0; font-size: 9px; font-weight: 700;
+        letter-spacing: 0.8px;
+    }
+    HorizontalLayout {
+        spacing: 5px;
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "♾";     tc-cat: Tr.wizard-tc-cat-unlimited; selected: root.game-tc-idx == 0; clicked => { root.game-tc-idx = 0; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "1+0";   tc-cat: Tr.wizard-tc-cat-bullet;    selected: root.game-tc-idx == 1; clicked => { root.game-tc-idx = 1; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "2+1";   tc-cat: Tr.wizard-tc-cat-bullet;    selected: root.game-tc-idx == 2; clicked => { root.game-tc-idx = 2; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "3+2";   tc-cat: Tr.wizard-tc-cat-blitz;     selected: root.game-tc-idx == 3; clicked => { root.game-tc-idx = 3; } }
+    }
+    HorizontalLayout {
+        spacing: 5px;
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "5+0";   tc-cat: Tr.wizard-tc-cat-blitz;     selected: root.game-tc-idx == 4; clicked => { root.game-tc-idx = 4; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "10+5";  tc-cat: Tr.wizard-tc-cat-rapid;     selected: root.game-tc-idx == 5; clicked => { root.game-tc-idx = 5; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "15+10"; tc-cat: Tr.wizard-tc-cat-rapid;     selected: root.game-tc-idx == 6; clicked => { root.game-tc-idx = 6; } }
+        TimeControlBtn { horizontal-stretch: 1; tc-label: "90+30"; tc-cat: Tr.wizard-tc-cat-classical; selected: root.game-tc-idx == 7; clicked => { root.game-tc-idx = 7; } }
+    }
+    Text {
+        text: root.game-tc-idx == 0 ? Tr.wizard-tc-desc-unlimited
+            : root.game-tc-idx == 1 ? Tr.wizard-tc-desc-bullet1
+            : root.game-tc-idx == 2 ? Tr.wizard-tc-desc-bullet2
+            : root.game-tc-idx == 3 ? Tr.wizard-tc-desc-blitz1
+            : root.game-tc-idx == 4 ? Tr.wizard-tc-desc-blitz2
+            : root.game-tc-idx == 5 ? Tr.wizard-tc-desc-rapid1
+            : root.game-tc-idx == 6 ? Tr.wizard-tc-desc-rapid2
+            : Tr.wizard-tc-desc-classical;
+        color: Theme.subtext0; font-size: 10px; wrap: word-wrap;
+    }
+
+    // ── Handicap section — visible only with a timed time control ────
+    if root.game-tc-idx != 0: VerticalLayout {
+        spacing: 6px;
+
+        // ⚖ Different times toggle
+        HorizontalLayout {
+            spacing: 8px; alignment: start; height: 24px;
+            Rectangle {
+                width: 36px; height: 20px; border-radius: 10px;
+                background: root.handicap-mode ? Theme.blue : Theme.surface1;
+                animate background { duration: 120ms; }
+                Rectangle {
+                    width: 16px; height: 16px; border-radius: 8px;
+                    x: root.handicap-mode ? 18px : 2px; y: 2px;
+                    background: #ffffff;
+                    animate x { duration: 130ms; easing: ease-in-out; }
+                }
+                ta-toggle := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.handicap-mode = !root.handicap-mode; }
+                }
+            }
+            Text {
+                text: "⚖  " + Tr.wizard-handicap-toggle;
+                color: Theme.text; font-size: 10px;
+                vertical-alignment: center;
+            }
+        }
+
+        // White / Black spin controls (visible only if handicap is active)
+        if root.handicap-mode: HorizontalLayout {
+            spacing: 20px; alignment: center;
+
+            // ── White ───────────────────────────────────────────────────
+            VerticalLayout {
+                spacing: 5px; alignment: center;
+                HorizontalLayout {
+                    alignment: center; spacing: 4px;
+                    Image { source: @image-url("../assets/pieces/wK.svg"); width: 12px; height: 12px; image-fit: contain; }
+                    Text {
+                        text: Tr.board-white;
+                        color: Theme.text; font-size: 10px; font-weight: 700;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 5px; alignment: center;
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 6px;
+                        background: ta-wm.has-hover ? Theme.hover : Theme.surface0;
+                        border-width: 1px; border-color: Theme.surface1;
+                        Text { text: "−"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        ta-wm := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { if root.white-time-min > 1 { root.white-time-min -= 1; } }
+                        }
+                    }
+                    Text {
+                        text: "\{root.white-time-min} min";
+                        color: Theme.blue; font-size: 13px; font-weight: 700;
+                        min-width: 52px; horizontal-alignment: center;
+                    }
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 6px;
+                        background: ta-wp.has-hover ? Theme.hover : Theme.surface0;
+                        border-width: 1px; border-color: Theme.surface1;
+                        Text { text: "+"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        ta-wp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { if root.white-time-min < 180 { root.white-time-min += 1; } }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 18px; border-radius: 4px;
+                    background: ta-rw.has-hover ? Theme.hover : Theme.surface0;
+                    Text {
+                        text: "↺  preset : \{root.preset-min} min";
+                        font-size: 9px; color: Theme.overlay0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    ta-rw := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.white-time-min = root.preset-min; }
+                    }
+                }
+            }
+
+            // ── Black ────────────────────────────────────────────────────
+            VerticalLayout {
+                spacing: 5px; alignment: center;
+                HorizontalLayout {
+                    alignment: center; spacing: 4px;
+                    Image { source: @image-url("../assets/pieces/bK.svg"); width: 12px; height: 12px; image-fit: contain; }
+                    Text {
+                        text: Tr.board-black;
+                        color: Theme.text; font-size: 10px; font-weight: 700;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 5px; alignment: center;
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 6px;
+                        background: ta-bm.has-hover ? Theme.hover : Theme.surface0;
+                        border-width: 1px; border-color: Theme.surface1;
+                        Text { text: "−"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        ta-bm := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { if root.black-time-min > 1 { root.black-time-min -= 1; } }
+                        }
+                    }
+                    Text {
+                        text: "\{root.black-time-min} min";
+                        color: Theme.blue; font-size: 13px; font-weight: 700;
+                        min-width: 52px; horizontal-alignment: center;
+                    }
+                    Rectangle {
+                        width: 26px; height: 26px; border-radius: 6px;
+                        background: ta-bp.has-hover ? Theme.hover : Theme.surface0;
+                        border-width: 1px; border-color: Theme.surface1;
+                        Text { text: "+"; color: Theme.text; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; }
+                        ta-bp := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { if root.black-time-min < 180 { root.black-time-min += 1; } }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 18px; border-radius: 4px;
+                    background: ta-rb.has-hover ? Theme.hover : Theme.surface0;
+                    Text {
+                        text: "↺  preset : \{root.preset-min} min";
+                        font-size: 9px; color: Theme.overlay0;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    ta-rb := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.black-time-min = root.preset-min; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Multi-step wizard ───────────────────────────────────────────────────────
+//
+// Step 0: mode choice (H vs H / H vs M / M vs M / Preferences)
+// Step 1: config contextual to the mode
+//           · H vs H → "ready" message (no engine)
+//           · H vs M → human color + engine selection + time
+//           · M vs M → two engine panels side by side
+//
+// The engine paths are `in-out` so Rust can pre-fill them.
+// The list of available engines comes from `available-engines` (from prefs).
+export component GameSetupWizard inherits Rectangle {
+    // Engine paths (pre-filled by Rust from the prefs list).
+    in-out property <string>       engine-path-w;
+    in-out property <string>       engine-path-b;
+    // List of saved UCI engines, passed from AppWindow → prefs.
+    in property  <[SavedEngine]>   available-engines;
+    // Number of puzzles in the database (PHASE 14, Step 5) — grays out the "Puzzle" card
+    // if 0, same principle as graying out "Engine Tournament".
+    in property  <int>             puzzle-count: 0;
+    // Number of games in the reference database (PHASE 82) — grays out the
+    // "Browse Database" card if 0, same principle as "Puzzle" above.
+    in property  <int>             reference-game-count: 0;
+    // Saved Puzzle mode choices (pre-filled by Rust from prefs).
+    in-out property <bool>         puzzle-hint-theme:  false; // false = "No hint", true = "With theme"
+    in-out property <bool>         puzzle-hint-button: true;  // hint button active by default
+
+    // Callbacks
+    /// Triggered when the user clicks "Start".
+    /// Parameters: mode (0/1/2), hcolor (0/1/2), path-w, path-b, level-w, level-b,
+    ///              game-tc-idx, white-time-secs (0=preset), black-time-secs (0=preset)
+    callback launch(int, int, string, string, int, int, int, int, int);
+    /// Triggered when the user clicks "Start" in Puzzle mode (mode 4).
+    /// Parameters: hint-theme (show the theme before solving), hint-button (hint
+    /// button active during the search).
+    callback launch-puzzle(bool, bool);
+    /// Triggered when the user clicks "Cancel" (returns to the current game).
+    callback cancel;
+    /// Triggered when the user clicks the "⚙ Preferences" card (step 0).
+    /// AppWindow opens the full Preferences panel.
+    callback open-preferences;
+    /// Triggered when the user confirms they want to quit the application.
+    callback quit-app;
+    /// Triggered when the user clicks "About" (step 0).
+    /// AppWindow shows the "About" overlay (author, license, technologies).
+    callback open-about;
+    /// Triggered when the user selects "Engine Tournament" and clicks Next.
+    /// AppWindow closes this wizard and opens the TournamentSetupWizard.
+    callback open-tournament;
+    /// Triggered when the user clicks "📂 Load from PGN…".
+    /// Rust opens a native file dialog, reads the file and updates `wizard-pgn-filename`.
+    callback pick-pgn();
+    /// Triggered when the user clicks "📝 Define from the editor".
+    /// AppWindow opens the PositionEditor in wizard mode.
+    callback open-position-editor-wizard();
+    /// Triggered when the user clicks "📚 From the game database…" (step 1,
+    /// ergonomics bugfix 09/07/2026: third starting-position source promised
+    /// in the PHASE 82 spec but never wired up). Unlike
+    /// `open-navigation-base` (step-0 card, which CLOSES the wizard), this one opens
+    /// `ReferenceBrowser` ON TOP OF the wizard without destroying it (already-chosen
+    /// mode preserved) — see `app.slint::open-reference-browser-wizard`.
+    callback open-reference-browser-wizard();
+    /// Triggered when the user clicks the "📚 Browse Database" card (step 0,
+    /// PHASE 82). Unlike the mode cards (H vs H/H vs M/M vs M/Tournament/
+    /// Puzzle) which select `mode` and then chain to step 1, this card
+    /// behaves like "⚙ Preferences" above: a direct callback, without going
+    /// through `mode` or step 1 of the game configuration (decision made in
+    /// discussion, PHASE 82, point 11).
+    callback open-navigation-base();
+
+    // ── Internal state ──────────────────────────────────────────────────────────
+    in-out property <int>   step:           0;   // 0 = mode, 1 = engine + time control config
+    private property <int>  mode:           1;   // 0=HvH  1=HvM  2=MvM  3=Tournament  4=Puzzle
+    private property <int>  hcolor:         0;   // 0=White  1=Black  2=Random
+    private property <int>  level-w:        3;
+    private property <int>  level-b:        3;
+    // Time control index: 0=Unlimited 1=Bullet1+0 … 7=Classical90+30
+    private property <int>  game-tc-idx:    0;
+    // Selected engine index (for both panels)
+    private property <int>  sel-w:          0;
+    private property <int>  sel-b:          0;
+    // true = shows the close confirmation (step 0 only)
+    private property <bool> confirm-quit:   false;
+    // Handicap: both players can have different times
+    private property <bool> handicap-mode:  false;
+    private property <int>  white-time-min: 5;
+    private property <int>  black-time-min: 5;
+    // Name of the selected PGN file ("" = starting position — no PGN)
+    in-out property <string> wizard-pgn-filename: "";
+    // FEN of the position set via the editor OR chosen from the reference
+    // game database ("" = neither). Mutually exclusive with
+    // wizard-pgn-filename. `wizard-start-fen-from-base` distinguishes which of the two
+    // sources set it (ergonomics bugfix 09/07/2026), to know which button
+    // to show as active.
+    in-out property <string> wizard-start-fen: "";
+    in-out property <bool>   wizard-start-fen-from-base: false;
+
+    background: Theme.crust.with-alpha(0.88);
+
+    // ── Central card ────────────────────────────────────────────────────────
+    Rectangle {
+        // 890px → 1030px (PHASE 82): 7th "Browse Database" card added at
+        // step 0 (130px + 10px of extra spacing), breathing margin
+        // on either side kept identical (~30px, as before).
+        width: root.step == 0 ? 1030px
+             : root.mode == 0 ? 510px
+             : root.mode == 1 ? 490px
+             : root.mode == 4 ? 480px
+             : 740px;
+        // +34px on the game-tc-idx==0 branch (H vs M / M vs M): the thinking-time
+        // selector went from 5 to 12 levels, on two rows
+        // instead of one (EnginePanel.height: 200px → 234px).
+        height: root.step == 0 ? 270px
+              : root.mode == 0
+                  ? (root.game-tc-idx == 0 ? 418px : root.handicap-mode ? 538px : 478px)
+              // +20px (≈5mm, ergonomics feedback 10/07/2026): the bottom
+              // navigation buttons ("Previous"/"Cancel"/"Start") were being
+              // clipped by the card's boundary on the 3 height
+              // variants (normal/custom time control, handicap mode).
+              : root.mode == 1
+                  ? (root.game-tc-idx == 0 ? 762px : root.handicap-mode ? 773px : 708px)
+              // +40px (≈1cm, ergonomics feedback 10/07/2026): same issue as
+              // Human vs Engine above — bottom navigation buttons
+              // clipped by the card's boundary. Separated from the
+              // fallback branch below (which also serves Tournament mode, not
+              // reported, hence not touched) rather than enlarging both.
+              : root.mode == 2
+                  ? (root.game-tc-idx == 0 ? 682px : root.handicap-mode ? 693px : 628px)
+              // Initial 330px (Step 5) was too short: the actual content (2 titles +
+              // 2 explanatory texts + 2 rows of 60px cards + separator + navigation
+              // button row) needs ~440-460px. The excess was cut off by
+              // the container's `clip: true`, making "Cancel"/"Previous"/"Start"
+              // invisible and unreachable — bug reported by the user (03/07/2026).
+              : root.mode == 4 ? 460px
+              : (root.game-tc-idx == 0 ? 642px : root.handicap-mode ? 653px : 588px);
+
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+
+        background: Theme.base;
+        border-radius: 12px;
+        drop-shadow-blur:     32px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+
+        animate width  { duration: 200ms; easing: ease-in-out; }
+        animate height { duration: 200ms; easing: ease-in-out; }
+
+        VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            // ── Header ───────────────────────────────────────────────────
+            HorizontalLayout {
+                Text {
+                    text: "♟  " + Tr.menu-file-new-game;
+                    color: Theme.text; font-size: 15px; font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: root.step == 0 ? "1 / 2" : "2 / 2";
+                    color: Theme.overlay0; font-size: 11px; vertical-alignment: center;
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface0; }
+
+            // ── Step 0: mode selection + Preferences access ──────────
+            if root.step == 0 && !root.confirm-quit: HorizontalLayout {
+                spacing: 10px; alignment: center;
+                SetupCard { width: 130px; height: 105px; icon: "♟  ♟"; label: Tr.wizard-mode-human-vs-human; selected: root.mode == 0; clicked => { root.mode = 0; } }
+                // Human vs Engine card — grayed out + hint if no engine is configured
+                // (fixed on 05/07/2026: the card stayed clickable and at full
+                // opacity even without a configured engine, unlike Tournament/Puzzle)
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    Rectangle {
+                        width: 130px; height: 105px;
+                        opacity: root.available-engines.length >= 1 ? 1.0 : 0.38;
+                        SetupCard {
+                            width: 130px; height: 105px;
+                            icon: "♟  ⚙"; label: Tr.wizard-mode-human-vs-engine;
+                            selected: root.mode == 1;
+                            clicked => {
+                                if root.available-engines.length >= 1 { root.mode = 1; }
+                            }
+                        }
+                    }
+                    if root.available-engines.length == 0: Text {
+                        text: Tr.wizard-hint-need-engine;
+                        color: Theme.red; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // Engine vs Engine card — grayed out + hint if no engine is configured
+                // (fixed on 05/07/2026: the warning sentence was missing here, and the
+                // card stayed clickable/opaque without a configured engine — same requirement
+                // as Human vs Engine, see EnginePanel White/Black at step 1)
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    Rectangle {
+                        width: 130px; height: 105px;
+                        opacity: root.available-engines.length >= 1 ? 1.0 : 0.38;
+                        SetupCard {
+                            width: 130px; height: 105px;
+                            icon: "⚙  ⚙"; label: Tr.wizard-mode-engine-vs-engine;
+                            selected: root.mode == 2;
+                            clicked => {
+                                if root.available-engines.length >= 1 { root.mode = 2; }
+                            }
+                        }
+                    }
+                    if root.available-engines.length == 0: Text {
+                        text: Tr.wizard-hint-need-engine;
+                        color: Theme.red; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // Tournament card — grayed out if fewer than 2 engines are configured
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    Rectangle {
+                        width: 130px; height: 105px;
+                        opacity: root.available-engines.length >= 2 ? 1.0 : 0.38;
+                        SetupCard {
+                            width: 130px; height: 105px;
+                            icon: "⚔"; label: Tr.wizard-mode-tournament;
+                            selected: root.mode == 3;
+                            clicked => {
+                                if root.available-engines.length >= 2 { root.mode = 3; }
+                            }
+                        }
+                    }
+                    if root.available-engines.length < 2: Text {
+                        text: Tr.wizard-hint-need-2-engines;
+                        color: Theme.red; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // Puzzle card — grayed out if no puzzle imported (PHASE 14, Step 5)
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    Rectangle {
+                        width: 130px; height: 105px;
+                        opacity: root.puzzle-count > 0 ? 1.0 : 0.38;
+                        SetupCard {
+                            width: 130px; height: 105px;
+                            // Note: no chess piece glyph (♘/♞…) — see the
+                            // CLAUDE_AI.md guideline on glyphs not handled by the
+                            // user's system font.
+                            icon: "★"; label: Tr.wizard-mode-puzzle;
+                            selected: root.mode == 4;
+                            clicked => {
+                                if root.puzzle-count > 0 { root.mode = 4; }
+                            }
+                        }
+                    }
+                    if root.puzzle-count == 0: Text {
+                        text: Tr.wizard-hint-need-puzzles;
+                        color: Theme.red; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // Browse Database card — grayed out if no game database is loaded
+                // (PHASE 82). Not a `mode`: behavior modeled on the
+                // Preferences card below (direct callback), see `open-navigation-base`.
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    Rectangle {
+                        width: 130px; height: 105px;
+                        opacity: root.reference-game-count > 0 ? 1.0 : 0.38;
+                        SetupCard {
+                            width: 130px; height: 105px;
+                            icon: "📚"; label: Tr.wizard-mode-reference-base;
+                            selected: false;
+                            clicked => {
+                                if root.reference-game-count > 0 { root.open-navigation-base(); }
+                            }
+                        }
+                    }
+                    if root.reference-game-count == 0: Text {
+                        text: Tr.wizard-hint-need-base;
+                        color: Theme.red; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+                // Preferences card — hint if no engine is configured at all
+                // (green: a positive invitation to act, not a blocking warning —
+                // see user request from 05/07/2026)
+                VerticalLayout {
+                    width: 130px; spacing: 2px;
+                    SetupCard {
+                        width: 130px; height: 105px;
+                        icon: "⚙"; label: Tr.tooltip-prefs;
+                        selected: false; clicked => { root.open-preferences(); }
+                    }
+                    if root.available-engines.length == 0: Text {
+                        text: Tr.wizard-hint-add-engine-here;
+                        color: Theme.green; font-size: 8px;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+                }
+            }
+
+            // ── Close confirmation ─────────────────────────────────
+            if root.confirm-quit: VerticalLayout {
+                alignment: center; spacing: 10px;
+                Text {
+                    text: "⏻";
+                    font-size: 30px; color: Theme.rosewater;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: Tr.wizard-quit-confirm-title;
+                    color: Theme.text; font-size: 14px; font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: Tr.wizard-quit-confirm-body;
+                    color: Theme.overlay0; font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // ── Step 1, H vs H: time control + handicap ─────────────────────
+            if root.step == 1 && root.mode == 0: CadencePicker {
+                game-tc-idx    <=> root.game-tc-idx;
+                handicap-mode  <=> root.handicap-mode;
+                white-time-min <=> root.white-time-min;
+                black-time-min <=> root.black-time-min;
+            }
+
+            // ── Step 1, H vs M ───────────────────────────────────────────
+            if root.step == 1 && root.mode == 1: VerticalLayout {
+                spacing: 10px; alignment: start;
+
+                Text {
+                    text: Tr.wizard-your-color-title;
+                    color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                    letter-spacing: 0.8px;
+                }
+                HorizontalLayout {
+                    spacing: 8px; alignment: start;
+                    SetupCard { width: 92px; height: 60px; use-icon-image: true; icon-image: @image-url("../assets/pieces/wK.svg"); label: Tr.board-white;     selected: root.hcolor == 0; clicked => { root.hcolor = 0; } }
+                    SetupCard { width: 92px; height: 60px; use-icon-image: true; icon-image: @image-url("../assets/pieces/bK.svg"); label: Tr.board-black;      selected: root.hcolor == 1; clicked => { root.hcolor = 1; } }
+                    SetupCard { width: 92px; height: 60px; icon: "?";  label: Tr.wizard-color-random; selected: root.hcolor == 2; clicked => { root.hcolor = 2; } }
+                }
+
+                EnginePanel {
+                    panel-title:       Tr.wizard-engine-opponent;
+                    available-engines: root.available-engines;
+                    selected-idx <=>   root.sel-b;
+                    time-level   <=>   root.level-b;
+                    show-level:        root.game-tc-idx == 0;
+                    engine-path-changed(path) => { root.engine-path-b = path; }
+                }
+
+                // ── Time control + handicap ────────────────────────────────────
+                Rectangle { height: 1px; background: Theme.surface0; }
+                CadencePicker {
+                    game-tc-idx    <=> root.game-tc-idx;
+                    handicap-mode  <=> root.handicap-mode;
+                    white-time-min <=> root.white-time-min;
+                    black-time-min <=> root.black-time-min;
+                }
+            }
+
+            // ── Step 1, M vs M ───────────────────────────────────────────
+            if root.step == 1 && root.mode == 2: VerticalLayout {
+                spacing: 10px; alignment: start;
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    EnginePanel {
+                        horizontal-stretch: 1;
+                        panel-title:       Tr.wizard-engine-white;
+                        available-engines: root.available-engines;
+                        selected-idx <=>   root.sel-w;
+                        time-level   <=>   root.level-w;
+                        show-level:        root.game-tc-idx == 0;
+                        engine-path-changed(path) => { root.engine-path-w = path; }
+                    }
+                    EnginePanel {
+                        horizontal-stretch: 1;
+                        panel-title:       Tr.wizard-engine-black;
+                        available-engines: root.available-engines;
+                        selected-idx <=>   root.sel-b;
+                        time-level   <=>   root.level-b;
+                        show-level:        root.game-tc-idx == 0;
+                        engine-path-changed(path) => { root.engine-path-b = path; }
+                    }
+                }
+
+                // ── Time control + handicap ────────────────────────────────────
+                Rectangle { height: 1px; background: Theme.surface0; }
+                CadencePicker {
+                    game-tc-idx    <=> root.game-tc-idx;
+                    handicap-mode  <=> root.handicap-mode;
+                    white-time-min <=> root.white-time-min;
+                    black-time-min <=> root.black-time-min;
+                }
+            }
+
+            // ── Step 1, Puzzle ───────────────────────────────────────────
+            // No engine selection or time control: only the two saved
+            // choices validated on 03/07/2026.
+            if root.step == 1 && root.mode == 4: VerticalLayout {
+                spacing: 14px; alignment: start;
+
+                Text {
+                    text: Tr.wizard-puzzle-goal-title;
+                    color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                    letter-spacing: 0.8px;
+                }
+                Text {
+                    text: Tr.wizard-puzzle-goal-explanation;
+                    color: Theme.subtext0; font-size: 9px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px; alignment: start;
+                    SetupCard {
+                        width: 150px; height: 60px;
+                        icon: "?"; label: Tr.wizard-puzzle-no-hint;
+                        selected: !root.puzzle-hint-theme;
+                        clicked => { root.puzzle-hint-theme = false; }
+                    }
+                    SetupCard {
+                        width: 150px; height: 60px;
+                        icon: "i"; label: Tr.wizard-puzzle-with-theme;
+                        selected: root.puzzle-hint-theme;
+                        clicked => { root.puzzle-hint-theme = true; }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.surface0; }
+
+                Text {
+                    text: Tr.wizard-puzzle-hint-button-title;
+                    color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                    letter-spacing: 0.8px;
+                }
+                Text {
+                    text: Tr.wizard-puzzle-hint-button-explanation;
+                    color: Theme.subtext0; font-size: 9px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px; alignment: start;
+                    SetupCard {
+                        width: 150px; height: 60px;
+                        icon: "ON"; label: Tr.wizard-state-active;
+                        selected: root.puzzle-hint-button;
+                        clicked => { root.puzzle-hint-button = true; }
+                    }
+                    SetupCard {
+                        width: 150px; height: 60px;
+                        icon: "OFF"; label: Tr.wizard-state-inactive;
+                        selected: !root.puzzle-hint-button;
+                        clicked => { root.puzzle-hint-button = false; }
+                    }
+                }
+            }
+
+            // ── Starting position: optional PGN (step 1, all modes except Puzzle) ─
+            if root.step == 1 && root.mode != 4: VerticalLayout {
+                spacing: 6px;
+
+                Rectangle { height: 1px; background: Theme.surface0; }
+
+                Text {
+                    text: Tr.wizard-start-position-title;
+                    color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                    letter-spacing: 0.8px;
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    // "📂 Load PGN…" button — shows the file name if loaded
+                    Rectangle {
+                        horizontal-stretch: 1; height: 28px;
+                        border-radius: 6px; border-width: 1px;
+                        border-color: root.wizard-pgn-filename != "" ? Theme.blue : Theme.surface1;
+                        background: ta-pgn-pick.has-hover
+                            ? Theme.hover
+                            : (root.wizard-pgn-filename != ""
+                                ? Theme.blue.with-alpha(0.08)
+                                : Theme.surface0);
+                        animate background, border-color { duration: 100ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 5px; alignment: center;
+
+                            Text { text: "📂"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: root.wizard-pgn-filename != ""
+                                    ? root.wizard-pgn-filename
+                                    : Tr.wizard-pgn-load-placeholder;
+                                color: root.wizard-pgn-filename != "" ? Theme.blue : Theme.subtext0;
+                                font-size: 10px;
+                                font-weight: root.wizard-pgn-filename != "" ? 700 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        ta-pgn-pick := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.pick-pgn(); }
+                        }
+                    }
+
+                    // × button — clears the PGN selection
+                    if root.wizard-pgn-filename != "": Rectangle {
+                        width: 28px; height: 28px; border-radius: 6px;
+                        background: ta-pgn-clr.has-hover ? Theme.hover : Theme.surface0;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "×"; color: Theme.overlay0; font-size: 14px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-pgn-clr := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.wizard-pgn-filename = ""; }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    // "📝 Define from the editor…" button — mutually exclusive with PGN
+                    // and with the game database (ergonomics bugfix 09/07/2026:
+                    // `wizard-start-fen-from-base` distinguishes which of the two
+                    // set `wizard-start-fen`, so as not to show THIS button
+                    // as active when the position actually comes from the database).
+                    // Catppuccin green color: Mocha #a6e3a1 / Latte #40a02b (same palette as position_editor)
+                    Rectangle {
+                        horizontal-stretch: 1; height: 28px;
+                        border-radius: 6px; border-width: 1px;
+                        border-color: (root.wizard-start-fen != "" && !root.wizard-start-fen-from-base)
+                            ? (Theme.is-dark ? #a6e3a1 : #40a02b)
+                            : Theme.surface1;
+                        background: ta-editor.has-hover
+                            ? Theme.hover
+                            : ((root.wizard-start-fen != "" && !root.wizard-start-fen-from-base)
+                                ? (Theme.is-dark ? #a6e3a114 : #40a02b14)
+                                : Theme.surface0);
+                        animate background, border-color { duration: 100ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 5px; alignment: center;
+
+                            Text { text: "📝"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: (root.wizard-start-fen != "" && !root.wizard-start-fen-from-base)
+                                    ? Tr.wizard-editor-custom-position
+                                    : Tr.wizard-editor-define-placeholder;
+                                color: (root.wizard-start-fen != "" && !root.wizard-start-fen-from-base)
+                                    ? (Theme.is-dark ? #a6e3a1 : #40a02b)
+                                    : Theme.subtext0;
+                                font-size: 10px;
+                                font-weight: (root.wizard-start-fen != "" && !root.wizard-start-fen-from-base) ? 700 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        ta-editor := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.wizard-pgn-filename = "";  // mutually exclusive
+                                root.open-position-editor-wizard();
+                            }
+                        }
+                    }
+
+                    // × button — clears the editor position (only if it was
+                    // actually the editor, not the database, that set it)
+                    if root.wizard-start-fen != "" && !root.wizard-start-fen-from-base: Rectangle {
+                        width: 28px; height: 28px; border-radius: 6px;
+                        background: ta-fen-clr.has-hover ? Theme.hover : Theme.surface0;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "×"; color: Theme.overlay0; font-size: 14px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-fen-clr := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.wizard-start-fen = ""; }
+                        }
+                    }
+                }
+
+                // Ergonomics bugfix 09/07/2026 (user feedback: third
+                // starting-position source promised in the spec but never
+                // wired up) — "📚 From the game database…": opens the full
+                // browser screen ON TOP OF the wizard (already-chosen mode
+                // preserved, see `open-reference-browser-wizard` and
+                // `app.slint`), grayed out if no database is loaded. Catppuccin
+                // peach color (Theme.peach): third hue distinct from
+                // blue (PGN) and green (editor).
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    Rectangle {
+                        horizontal-stretch: 1; height: 28px;
+                        border-radius: 6px; border-width: 1px;
+                        opacity: root.reference-game-count > 0 ? 1.0 : 0.4;
+                        border-color: (root.wizard-start-fen != "" && root.wizard-start-fen-from-base)
+                            ? Theme.peach
+                            : Theme.surface1;
+                        background: ta-ref-picker.has-hover
+                            ? Theme.hover
+                            : ((root.wizard-start-fen != "" && root.wizard-start-fen-from-base)
+                                ? Theme.peach.with-alpha(0.08)
+                                : Theme.surface0);
+                        animate background, border-color { duration: 100ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 5px; alignment: center;
+
+                            Text { text: "📚"; font-size: 12px; vertical-alignment: center; }
+                            Text {
+                                text: (root.wizard-start-fen != "" && root.wizard-start-fen-from-base)
+                                    ? Tr.wizard-base-custom-position
+                                    : Tr.wizard-base-define-placeholder;
+                                color: (root.wizard-start-fen != "" && root.wizard-start-fen-from-base)
+                                    ? Theme.peach
+                                    : Theme.subtext0;
+                                font-size: 10px;
+                                font-weight: (root.wizard-start-fen != "" && root.wizard-start-fen-from-base) ? 700 : 400;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        ta-ref-picker := TouchArea {
+                            mouse-cursor: root.reference-game-count > 0 ? pointer : default;
+                            clicked => {
+                                if root.reference-game-count > 0 {
+                                    root.wizard-pgn-filename = "";  // mutually exclusive
+                                    root.open-reference-browser-wizard();
+                                }
+                            }
+                        }
+                    }
+
+                    // × button — clears the position picked from the database
+                    if root.wizard-start-fen != "" && root.wizard-start-fen-from-base: Rectangle {
+                        width: 28px; height: 28px; border-radius: 6px;
+                        background: ta-ref-clr.has-hover ? Theme.hover : Theme.surface0;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "×"; color: Theme.overlay0; font-size: 14px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-ref-clr := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.wizard-start-fen = "";
+                                root.wizard-start-fen-from-base = false;
+                            }
+                        }
+                    }
+                }
+                if root.reference-game-count == 0: Text {
+                    text: Tr.wizard-hint-need-base;
+                    color: Theme.red; font-size: 8px;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle { vertical-stretch: 1; }
+
+            // ── Navigation buttons ─────────────────────────────────────
+            HorizontalLayout {
+                spacing: 8px;
+
+                // ← Previous (steps 1 and 2)
+                if root.step > 0: Rectangle {
+                    width: 116px; height: 34px; border-radius: 7px;
+                    background: ta-prev.has-hover ? Theme.hover : Theme.surface0;
+                    Text { width: parent.width; height: parent.height; text: "← " + Tr.wizard-nav-previous; color: Theme.text; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-prev := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.step = root.step - 1; }
+                    }
+                }
+
+                // ⏻ Quit (step 0, outside confirmation)
+                if root.step == 0 && !root.confirm-quit: Rectangle {
+                    width: 94px; height: 34px; border-radius: 7px;
+                    background: ta-quit.has-hover
+                        ? Theme.rosewater.with-alpha(0.15)
+                        : Theme.surface0;
+                    animate background { duration: 100ms; }
+                    Text { width: parent.width; height: parent.height; text: "⏻  " + Tr.menu-file-quit; color: Theme.rosewater; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-quit := TouchArea { mouse-cursor: pointer; clicked => { root.confirm-quit = true; } }
+                }
+
+                // ℹ About (step 0, outside confirmation)
+                if root.step == 0 && !root.confirm-quit: Rectangle {
+                    width: 94px; height: 34px; border-radius: 7px;
+                    background: ta-about.has-hover ? Theme.hover : Theme.surface0;
+                    animate background { duration: 100ms; }
+                    Text { width: parent.width; height: parent.height; text: "ℹ  " + Tr.menu-help-about; color: Theme.subtext0; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-about := TouchArea { mouse-cursor: pointer; clicked => { root.open-about(); } }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // ── Confirmation mode: No / Yes ─────────────────────────
+                if root.confirm-quit: Rectangle {
+                    width: 80px; height: 34px; border-radius: 7px;
+                    background: ta-no.has-hover ? Theme.hover : Theme.surface0;
+                    Text { width: parent.width; height: parent.height; text: Tr.wizard-btn-no; color: Theme.text; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-no := TouchArea { mouse-cursor: pointer; clicked => { root.confirm-quit = false; } }
+                }
+                if root.confirm-quit: Rectangle {
+                    width: 120px; height: 34px; border-radius: 7px;
+                    background: ta-yes.has-hover
+                        ? Theme.rosewater.with-alpha(0.85)
+                        : Theme.rosewater;
+                    animate background { duration: 100ms; }
+                    Text { width: parent.width; height: parent.height; text: Tr.wizard-btn-yes-quit; color: #ffffff; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-yes := TouchArea { mouse-cursor: pointer; clicked => { root.quit-app(); } }
+                }
+
+                // ── Normal mode: Cancel + Next/Start ──────────────
+                if !root.confirm-quit: Rectangle {
+                    width: 86px; height: 34px; border-radius: 7px;
+                    background: ta-cancel.has-hover ? Theme.hover : Theme.surface0;
+                    Text { width: parent.width; height: parent.height; text: Tr.btn-cancel; color: Theme.overlay0; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-cancel := TouchArea { mouse-cursor: pointer; clicked => { root.cancel(); } }
+                }
+
+                if !root.confirm-quit: Rectangle {
+                    // Grayed out if: engine mode with no engine, or tournament with < 2 engines
+                    private property <bool> blocked:
+                        root.step == 0 && (
+                            ((root.mode == 1 || root.mode == 2) && root.available-engines.length == 0)
+                            || (root.mode == 3 && root.available-engines.length < 2)
+                            || (root.mode == 4 && root.puzzle-count == 0)
+                        );
+
+                    width: 124px; height: 34px; border-radius: 7px;
+                    background: self.blocked
+                        ? Theme.surface1
+                        : (ta-next.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue);
+                    animate background { duration: 100ms; }
+
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: root.step == 0 ? (Tr.wizard-btn-next + " →") : ("▶  " + Tr.btn-start);
+                        color: parent.blocked ? Theme.overlay0 : #ffffff;
+                        font-size: 11px; font-weight: 700;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    ta-next := TouchArea {
+                        mouse-cursor: parent.blocked ? default : pointer;
+                        clicked => {
+                            if parent.blocked { return; }
+                            if root.step == 0 {
+                                // Tournament: opens the dedicated wizard directly
+                                if root.mode == 3 {
+                                    root.open-tournament();
+                                } else {
+                                    // Auto-select the first engine if the path is still empty
+                                    if root.engine-path-b == "" && root.available-engines.length > 0 {
+                                        root.engine-path-b = root.available-engines[0].path;
+                                    }
+                                    if root.engine-path-w == "" && root.available-engines.length > 0 {
+                                        root.engine-path-w = root.available-engines[0].path;
+                                    }
+                                    root.step = 1;
+                                }
+                            } else if root.mode == 4 {
+                                root.launch-puzzle(root.puzzle-hint-theme, root.puzzle-hint-button);
+                            } else {
+                                root.launch(
+                                    root.mode,
+                                    root.hcolor,
+                                    root.engine-path-w,
+                                    root.engine-path-b,
+                                    root.level-w,
+                                    root.level-b,
+                                    root.game-tc-idx,
+                                    // 0 = use the preset, N = override in seconds
+                                    root.handicap-mode && root.game-tc-idx != 0
+                                        ? root.white-time-min * 60 : 0,
+                                    root.handicap-mode && root.game-tc-idx != 0
+                                        ? root.black-time-min * 60 : 0,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── "Replay?" recap screen ──────────────────────────────────────────
+export component GameSetupRecap inherits Rectangle {
+    in property <string> line1;
+    in property <string> line2;
+    in property <string> line3;
+
+    callback replay;        // Replay with the same config
+    callback new-config;    // Open the wizard for a new config
+    callback cancel-recap;  // Return to the ongoing game (accidental click)
+
+    background: Theme.crust.with-alpha(0.88);
+
+    Rectangle {
+        width: 420px; height: 236px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 12px;
+        drop-shadow-blur:     32px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-color: Theme.shadow;
+
+        VerticalLayout {
+            padding: 22px; spacing: 10px; alignment: start;
+
+            Text { text: Tr.wizard-recap-title; color: Theme.text; font-size: 15px; font-weight: 700; }
+            Rectangle { height: 1px; background: Theme.surface0; }
+
+            Text { text: root.line1; color: Theme.subtext0; font-size: 11px; }
+            Text { text: root.line2; color: Theme.subtext0; font-size: 11px; }
+            Text { text: root.line3; color: Theme.subtext0; font-size: 11px; overflow: elide; }
+
+            Rectangle { vertical-stretch: 1; }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                // ← Back (accidental click)
+                Rectangle {
+                    width: 86px; height: 34px; border-radius: 7px;
+                    background: ta-back.has-hover ? Theme.hover : Theme.surface0;
+                    Text { width: parent.width; height: parent.height; text: "← " + Tr.wizard-recap-back; color: Theme.overlay0; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-back := TouchArea { mouse-cursor: pointer; clicked => { root.cancel-recap(); } }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Rectangle {
+                    width: 118px; height: 34px; border-radius: 7px;
+                    background: ta-new.has-hover ? Theme.hover : Theme.surface0;
+                    Text { width: parent.width; height: parent.height; text: Tr.wizard-recap-new-config; color: Theme.text; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-new := TouchArea { mouse-cursor: pointer; clicked => { root.new-config(); } }
+                }
+                Rectangle {
+                    width: 100px; height: 34px; border-radius: 7px;
+                    background: ta-rep.has-hover
+                        ? Theme.blue.with-alpha(0.82)
+                        : Theme.blue;
+                    animate background { duration: 100ms; }
+                    Text { width: parent.width; height: parent.height; text: "▶  " + Tr.wizard-btn-replay; color: #ffffff; font-size: 11px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    ta-rep := TouchArea { mouse-cursor: pointer; clicked => { root.replay(); } }
+                }
+            }
+        }
+    }
+}

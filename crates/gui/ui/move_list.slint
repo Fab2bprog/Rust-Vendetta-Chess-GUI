@@ -1,0 +1,429 @@
+// Move history panel (Phase 6.6 / 7.3).
+//
+// 7.3: colors bound to the global Theme (light/dark theme).
+
+import { ListView } from "std-widgets.slint";
+import { Theme }    from "theme.slint";
+
+export struct MoveRow {
+    number-str: string,
+    white-san:  string,
+    black-san:  string,
+    white-ply:  int,
+    black-ply:  int,
+    // Move played automatically from a Polyglot opening book rather
+    // than computed by the engine (PHASE 15). Shown with a discreet 📖 icon.
+    white-from-book: bool,
+    black-from-book: bool,
+    // Text of the variations attached to this move (PHASE 16, Step 4), already
+    // PGN-formatted by `GameTree::build_variation_blocks` on the Rust side
+    // (several variations for the same move joined by " | "). Empty string
+    // = no variation.
+    white-variations: string,
+    black-variations: string,
+    // Node identifiers (PHASE 16, Step 6.1) — target of the context menu
+    // (right-click). `-1` if absent (empty Black cell at the end of the game).
+    white-node-id: int,
+    black-node-id: int,
+    // NAG glyph already applied to the main-line move (e.g. "!", "??"), already
+    // appended to the SAN in the display — empty string if no annotation.
+    white-nag: string,
+    black-nag: string,
+    // Identifier of the first move of the **first** variation at this ply
+    // (`-1` if none) — target of a right-click on the collapsed variation
+    // block (a collapsed block only exposes its starting move, not its
+    // internal moves individually; if several variations coexist at the same
+    // ply, only the first is currently clickable).
+    white-variation-node-id: int,
+    black-variation-node-id: int,
+    // Free-text comment attached to the main-line move (PHASE 16, Step
+    // 6.3), empty string = none. Limited to the main line for this
+    // step (decision made on 04/07/2026): a variation move has no
+    // displayable/editable comment for now.
+    white-comment: string,
+    black-comment: string,
+    // PHASE 70: move category for the list's syntax highlighting
+    // (computed on the Rust side in `GameController::build_move_rows`, descending
+    // priority when several apply — e.g. a capture that also gives check
+    // is shown with the "check" color, not "capture"):
+    //   0 = normal move · 1 = capture · 2 = castling · 3 = promotion
+    //   4 = check        · 5 = checkmate
+    white-move-kind: int,
+    black-move-kind: int,
+}
+
+// ── Component: a clickable cell ───────────────────────────────────────
+// Exported on 10/07/2026 (ergonomics follow-up) to be reused as-is by
+// `game_detail.slint`, which wants the same per-category syntax
+// highlighting (see `move-kind` below) as the main history panel
+// — no separate reimplementation, to stay guaranteed identical over
+// time. `move_list.slint` imports neither `app.slint` nor `game_detail.slint`,
+// so there's no risk of a circular import.
+export component MoveCell inherits Rectangle {
+    in property <string> san;
+    in property <string> nag: "";
+    in property <bool>   active:  false;
+    in property <bool>   enabled: true;
+    in property <bool>   from-book: false;
+    // PHASE 70: move category (see `MoveRow.white-move-kind` for the
+    // value details) — drives the text color below, taking priority
+    // over the usual active/inactive distinction (the background highlight
+    // already signals the active move; the color remains reserved for the
+    // move category).
+    in property <int>    move-kind: 0;
+
+    callback clicked;
+    // PHASE 16: context menu — NAG (Step 6.1), promote to main
+    // line / delete variation (Step 6.2), inline comment
+    // limited to the main line (Step 6.3).
+    callback right-clicked;
+
+    height: 24px;
+    border-radius: 4px;
+    background: active ? Theme.surface1 :
+                (enabled && ta.has-hover) ? Theme.hover : #00000000;
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: san == "" ? "" : san + nag;
+        // PHASE 70: syntax highlighting by move category, descending
+        // priority mate > check > castling/promotion > capture > normal (a
+        // disabled cell — no move — stays overlay1 as before).
+        color: !enabled ? Theme.overlay1 :
+               (move-kind == 5 || move-kind == 4) ? Theme.red :
+               move-kind == 3 ? Theme.rosewater :
+               move-kind == 2 ? Theme.blue :
+               move-kind == 1 ? Theme.peach :
+               active ? Theme.text : Theme.subtext0;
+        font-weight: move-kind == 5 ? 800 : 400;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    // Icon for a move played from a Polyglot book (PHASE 15). Enlarged and
+    // recolored (03/07/2026): at 8px/overlay0 it was too discreet to
+    // be noticed during normal use — direct user feedback.
+    if root.from-book && root.san != "": Text {
+        x: parent.width - self.width - 2px;
+        y: 0px;
+        text: "📖";
+        font-size: 12px;
+        color: Theme.peach;
+    }
+
+    // TouchArea always present (needed for ta.has-hover),
+    // left-click is only forwarded if the cell is enabled; right-click
+    // opens the context menu as soon as a move is present (independent
+    // of `enabled`, which only governs history navigation).
+    ta := TouchArea {
+        mouse-cursor: enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { if (root.enabled) { root.clicked(); } }
+        pointer-event(event) => {
+            if (root.san != "" && event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.right-clicked();
+            }
+        }
+    }
+}
+
+// ── Main component ────────────────────────────────────────────────────
+export component MoveList inherits Rectangle {
+    in property <[MoveRow]> moves;
+    in property <int>       current-ply: -1;
+
+    callback move-clicked(int);
+    // PHASE 16, Step 6.1: move targeted by a right-click (node
+    // identifier, text to show in the context menu) — a move from the main
+    // line or the first move of a collapsed variation block.
+    //
+    // PHASE 16, Step 6.2: third parameter `is-variation` — `true` if
+    // the click comes from a collapsed variation block, `false` if it comes
+    // from a main-line cell. Determined statically based on
+    // the originating element (see call sites below), without needing
+    // to query `GameController`: controls whether "Promote to
+    // main line"/"Delete this variation" are shown in the context menu
+    // (decision 7 — never offered for a main-line move).
+    callback move-right-clicked(int, string, bool);
+
+    // PHASE 16, Step 6.3: identifier of the node whose comment is
+    // currently being edited inline (`-1` = no edit in progress). Limited to the
+    // main line for this step (decision made on 04/07/2026) —
+    // will therefore never match a `white/black-variation-node-id`.
+    in property <int> editing-comment-node-id: -1;
+    // Comment validated ("Validate" button or Enter key) for the targeted
+    // node — the final typed text is read from the `TextInput` element at
+    // the moment of the click/validation, not from a separate property.
+    callback comment-saved(int, string);
+    // Edit abandoned ("Cancel" button) — no change.
+    callback comment-cancelled();
+
+    background: Theme.base;
+    clip: true;
+
+    ListView {
+        for row in root.moves: Rectangle {
+            // Main line row height (26px) + one extra block
+            // per variation present (PHASE 16, Step 4) + one block for the
+            // White/Black move comment (PHASE 16, Step 6.3): taller
+            // (44px) while editing (text field + buttons) than
+            // for a plain display (20px).
+            height: 26px
+                + (row.white-variations == "" ? 0px : 22px)
+                + (row.black-variations == "" ? 0px : 22px)
+                + ((root.editing-comment-node-id >= 0 && row.white-node-id == root.editing-comment-node-id)
+                    ? 44px
+                    : (row.white-comment == "" ? 0px : 20px))
+                + ((root.editing-comment-node-id >= 0 && row.black-node-id == root.editing-comment-node-id)
+                    ? 44px
+                    : (row.black-comment == "" ? 0px : 20px));
+            background: #00000000;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 26px;
+                    background: #00000000;
+
+                    HorizontalLayout {
+                        padding-left: 6px; padding-right: 6px;
+                        spacing: 2px; alignment: stretch;
+
+                        // ── Move number ────────────────────────────────
+                        Rectangle {
+                            width: 28px; height: parent.height;
+                            background: #00000000;
+
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: row.number-str;
+                                color: Theme.overlay0;
+                                font-size: 11px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // ── White move ────────────────────────────────────
+                        MoveCell {
+                            horizontal-stretch: 1;
+                            san:       row.white-san;
+                            nag:       row.white-nag;
+                            active:    root.current-ply == row.white-ply;
+                            enabled:   true;
+                            from-book: row.white-from-book;
+                            move-kind: row.white-move-kind;
+                            clicked => { root.move-clicked(row.white-ply); }
+                            right-clicked => { root.move-right-clicked(row.white-node-id, row.white-san + row.white-nag, false); }
+                        }
+
+                        // ── Black move ─────────────────────────────────────
+                        MoveCell {
+                            horizontal-stretch: 1;
+                            san:       row.black-san;
+                            nag:       row.black-nag;
+                            active:    row.black-ply >= 0 && root.current-ply == row.black-ply;
+                            enabled:   row.black-ply >= 0;
+                            from-book: row.black-from-book;
+                            move-kind: row.black-move-kind;
+                            clicked => { root.move-clicked(row.black-ply); }
+                            right-clicked => { root.move-right-clicked(row.black-node-id, row.black-san + row.black-nag, false); }
+                        }
+                    }
+                }
+
+                // ── Variation(s) after the White move (PHASE 16, Step 4) ───
+                // Right-click (Step 6.1): targets the first move of the
+                // first variation shown in this collapsed block.
+                if row.white-variations != "": Rectangle {
+                    height: 22px;
+                    background: Theme.surface0;
+                    border-radius: 4px;
+
+                    Text {
+                        x: 14px;
+                        width: parent.width - 18px; height: parent.height;
+                        text: row.white-variations;
+                        color: Theme.subtext0;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                                root.move-right-clicked(row.white-variation-node-id, row.white-variations, true);
+                            }
+                        }
+                    }
+                }
+
+                // ── Variation(s) after the Black move (PHASE 16, Step 4) ────
+                if row.black-variations != "": Rectangle {
+                    height: 22px;
+                    background: Theme.surface0;
+                    border-radius: 4px;
+
+                    Text {
+                        x: 14px;
+                        width: parent.width - 18px; height: parent.height;
+                        text: row.black-variations;
+                        color: Theme.subtext0;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                                root.move-right-clicked(row.black-variation-node-id, row.black-variations, true);
+                            }
+                        }
+                    }
+                }
+
+                // ── White move comment (PHASE 16, Step 6.3) ───────
+                // Inline editing (decision 8: never a modal window) —
+                // pre-filled with the existing comment if any.
+                if root.editing-comment-node-id >= 0 && row.white-node-id == root.editing-comment-node-id: Rectangle {
+                    height: 44px;
+                    background: Theme.surface0;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding: 6px; spacing: 6px;
+
+                        ti-white := TextInput {
+                            horizontal-stretch: 1;
+                            height: parent.height;
+                            text: row.white-comment;
+                            font-size: 10px;
+                            font-italic: true;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                            accepted => { root.comment-saved(row.white-node-id, self.text); }
+                        }
+
+                        Rectangle {
+                            width: 26px; height: 26px;
+                            border-radius: 4px;
+                            background: ta-save-w.has-hover ? Theme.green.with-alpha(0.30) : Theme.surface1;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "✓"; color: Theme.green; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            ta-save-w := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.comment-saved(row.white-node-id, ti-white.text); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 50px; height: 26px;
+                            border-radius: 4px;
+                            background: ta-cancel-w.has-hover ? Theme.surface1.with-alpha(0.90) : Theme.surface1.with-alpha(0.70);
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "Annuler"; color: Theme.text; font-size: 9px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            ta-cancel-w := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.comment-cancelled(); }
+                            }
+                        }
+                    }
+                }
+
+                // Display only (not being edited) — italic, indented,
+                // same visual family as the variation blocks
+                // (decision 5) but without a tinted background, to stay distinct.
+                if !(root.editing-comment-node-id >= 0 && row.white-node-id == root.editing-comment-node-id) && row.white-comment != "": Rectangle {
+                    height: 20px;
+                    background: #00000000;
+
+                    Text {
+                        x: 14px;
+                        width: parent.width - 18px; height: parent.height;
+                        text: row.white-comment;
+                        color: Theme.overlay0;
+                        font-size: 10px;
+                        font-italic: true;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // ── Black move comment (PHASE 16, Step 6.3) ────────
+                if root.editing-comment-node-id >= 0 && row.black-node-id == root.editing-comment-node-id: Rectangle {
+                    height: 44px;
+                    background: Theme.surface0;
+                    border-radius: 4px;
+
+                    HorizontalLayout {
+                        padding: 6px; spacing: 6px;
+
+                        ti-black := TextInput {
+                            horizontal-stretch: 1;
+                            height: parent.height;
+                            text: row.black-comment;
+                            font-size: 10px;
+                            font-italic: true;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                            accepted => { root.comment-saved(row.black-node-id, self.text); }
+                        }
+
+                        Rectangle {
+                            width: 26px; height: 26px;
+                            border-radius: 4px;
+                            background: ta-save-b.has-hover ? Theme.green.with-alpha(0.30) : Theme.surface1;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "✓"; color: Theme.green; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            ta-save-b := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.comment-saved(row.black-node-id, ti-black.text); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 50px; height: 26px;
+                            border-radius: 4px;
+                            background: ta-cancel-b.has-hover ? Theme.surface1.with-alpha(0.90) : Theme.surface1.with-alpha(0.70);
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "Annuler"; color: Theme.text; font-size: 9px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            ta-cancel-b := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.comment-cancelled(); }
+                            }
+                        }
+                    }
+                }
+
+                if !(root.editing-comment-node-id >= 0 && row.black-node-id == root.editing-comment-node-id) && row.black-comment != "": Rectangle {
+                    height: 20px;
+                    background: #00000000;
+
+                    Text {
+                        x: 14px;
+                        width: parent.width - 18px; height: parent.height;
+                        text: row.black-comment;
+                        color: Theme.overlay0;
+                        font-size: 10px;
+                        font-italic: true;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

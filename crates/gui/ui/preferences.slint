@@ -1,0 +1,2193 @@
+// ui/preferences.slint
+// Complete Preferences panel with tree-style navigation.
+//
+// Structure:
+//   ┌──────────────────────────────────────────────────────┐
+//   │  ⚙  Preferences                                [X]  │
+//   ├─────────────────┬────────────────────────────────────┤
+//   │  🌐 Language    │  Contextual content                │
+//   │  ⚙  Engines    │  (changes based on selected node)  │
+//   │  📖 Openings   │                                    │
+//   │  🧩 Puzzles    │                                    │
+//   │  🎨 Appearance │                                    │
+//   │  ↺ Reset       │                                    │
+//   │  🔧 Misc       │                                    │
+//   ├─────────────────┴────────────────────────────────────┤
+//   │                                             [Close]  │
+//   └──────────────────────────────────────────────────────┘
+//
+// Sidebar split into 6 nodes since PHASE 23 (ergonomics bugfix from
+// 03/07/2026) — "Engines" used to also contain the Polyglot opening books
+// and puzzles, forcing a lot of scrolling within a single panel.
+//
+// Exported components:
+//   PreferencesPanel — 700×540px overlay
+
+import { Theme }                      from "theme.slint";
+import { SavedEngine, UciOptionItem } from "types.slint";
+import { LanguageDropdown }           from "language_setup.slint";
+import { Tr }                         from "translations.slint";
+
+// ── Vertical scrollbar (ergonomics bugfix from 05/07/2026) ────────────────────
+//
+// User report: in the Engines tab, the scrolling area (`Flickable`)
+// shows no visible scrollbar — unlike `LanguageList`/
+// `LanguageDropdown` (language_setup.slint), this content is NOT a simple
+// homogeneous list (a single `for`) but a heterogeneous stack: title, button,
+// empty-state message, engine list, nested UCI options panel,
+// note, separator, hint-engine selector… Replacing the `Flickable` with
+// the native `ListView` widget (as done for the language lists) is therefore NOT
+// risk-free here: `ListView` places its children inside a bare internal
+// `Flickable`, with no implicit layout for stacking heterogeneous
+// elements side by side — only a single `for` benefits from implicit vertical
+// flow (already used for the move history and language lists). Mixing a
+// `for` with other independent elements in this context is not proven
+// anywhere in this project and would risk silently breaking the
+// current layout (which currently works).
+//
+// Safer solution adopted: keep the existing `Flickable` as-is
+// (it already correctly handles this heterogeneous content) and add a
+// dedicated, hand-drawn visual scrollbar next to it, in a separate column of
+// fixed width (6px) — so it can never overlap the content. The
+// cursor-drag logic reuses the pattern already proven in this project for
+// the analysis panel's resize handle (`app.slint`, `moved` callback
+// of the `ta-split` `TouchArea`: incremental delta via
+// `self.mouse-y - self.pressed-y`).
+component VScrollbar inherits Rectangle {
+    // Total height of the scrolling content (= `Flickable.viewport-height`).
+    in property <length> content-height: 1px;
+    // Height of the visible area (= `Flickable.height`).
+    in property <length> view-height: 1px;
+    // Current scroll offset (= `Flickable.viewport-y`, always
+    // ≤ 0: 0 at the top, `-(content-height - view-height)` at the very bottom).
+    in-out property <length> scroll-y: 0px;
+
+    width: 6px;
+
+    private property <bool>   can-scroll: root.content-height > root.view-height;
+    private property <length> scroll-range: root.content-height - root.view-height;
+    private property <length> thumb-height: root.can-scroll
+        ? max(24px, root.view-height * root.view-height / root.content-height)
+        : root.view-height;
+    private property <length> track-range: root.view-height - root.thumb-height;
+
+    // Track (always visible, even when scrolling isn't possible, to keep a
+    // constant visual reference point — avoids the "appears/disappears" effect
+    // between tabs).
+    Rectangle {
+        width: parent.width; height: parent.height;
+        background: Theme.surface0;
+        border-radius: 3px;
+    }
+
+    if root.can-scroll: Rectangle {
+        y: root.track-range <= 0px
+            ? 0px
+            : (-root.scroll-y) / root.scroll-range * root.track-range;
+        width: parent.width;
+        height: root.thumb-height;
+        border-radius: 3px;
+        background: ta-thumb.has-hover ? Theme.overlay1 : Theme.overlay0;
+        animate background { duration: 80ms; }
+
+        ta-thumb := TouchArea {
+            mouse-cursor: default;
+            moved => {
+                root.scroll-y = clamp(
+                    root.scroll-y
+                        - (self.mouse-y - self.pressed-y)
+                            * (root.scroll-range / max(1px, root.track-range)),
+                    -root.scroll-range,
+                    0px
+                );
+            }
+        }
+    }
+}
+
+// ── "Hint engine" dropdown menu ──────────────────────────────────────────
+//
+// PHASE 52 (05/07/2026). Replaces the old presentation (one row/checkbox per
+// configured engine, plus the "(None)" row) — visually too heavy
+// once several engines are configured, per the user's explicit
+// feedback: "instead of adding 1 button per [engine], make me a
+// dropdown menu". Reuses the pattern already proven by `LanguageDropdown`
+// (language_setup.slint): clickable closed row + dropdown list on
+// top (no `clip: true` on the component itself, as in
+// `LanguageDropdown`) that closes when an option is chosen or on a click outside
+// the list (invisible curtain `TouchArea`).
+//
+// Deliberate difference from `LanguageDropdown`: the engine list can
+// grow without a bound known in advance (manually imported engines +
+// automatic detection of the `moteurs/` folder, PHASE 24), and is not a
+// homogeneous list that could safely use `ListView` here: it would require
+// inserting a static "None" row BEFORE the `for` over `root.engines`
+// in the same repeater, which would mean merging these two sources into
+// a single array; Slint offers no usable array-concatenation
+// operator here. Solution adopted: reuse as-is the `Flickable` +
+// `VScrollbar` pair (component above) already set up for
+// the Engines tab — the "None" row and the `for` remain two
+// distinct elements of the same `VerticalLayout`, a structure already
+// proven in this file.
+//
+// The label of the closed row (`current-name`) is supplied by Rust
+// (`hint_engine_display_name` in main.rs), not recomputed here via a
+// `engine.path == current-path` lookup in `root.engines`: this lookup
+// pattern (`for ... : if ... : Text {...}` outside its own display `for`)
+// was explicitly ruled out as unproven in this project
+// (see `LanguageDropdown` comment) — same principle as
+// `book-name-white`/`book-name-black`, already resolved on the Rust side.
+component HintEngineDropdown inherits Rectangle {
+    in property <[SavedEngine]> engines;
+    // Path of the engine currently selected as hint ("" = none).
+    in property <string> current-path: "";
+    // Display name already resolved on the Rust side for `current-path` ("" if none
+    // or if the engine has since been removed from the list — see comment
+    // above).
+    in property <string> current-name: "";
+    // -1 = "None" chosen, otherwise index in `engines`.
+    callback chosen(int);
+
+    private property <bool> expanded: false;
+
+    height: 36px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: ta-closed.has-hover || root.expanded ? Theme.blue : Theme.surface1;
+    background: ta-closed.has-hover || root.expanded
+        ? Theme.blue.with-alpha(0.12) : Theme.surface0;
+    animate background, border-color { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px;
+        spacing: 8px; alignment: start;
+
+        Text {
+            text: root.current-path == "" ? Tr.prefs-none-label : root.current-name;
+            color: Theme.text; font-size: 11px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.expanded ? "▴" : "▾";
+            color: Theme.overlay0; font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+
+    ta-closed := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.expanded = !root.expanded; }
+    }
+
+    // Invisible curtain: a click outside the list closes it (pattern reused from
+    // `LanguageDropdown`).
+    if root.expanded: Rectangle {
+        x: 0; y: 40px;
+        width: parent.width; height: 240px;
+        background: transparent;
+        z: 90;
+        TouchArea { clicked => { root.expanded = false; } }
+    }
+
+    if root.expanded: Rectangle {
+        x: 0; y: 40px;
+        width: parent.width;
+        height: min(220px, list-vl.preferred-height + 8px);
+        background: Theme.surface0;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Theme.surface1;
+        drop-shadow-blur: 14px;
+        drop-shadow-offset-y: 4px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+        z: 100;
+
+        HorizontalLayout {
+            padding: 4px;
+            spacing: 4px;
+
+            list-flick := Flickable {
+                horizontal-stretch: 1;
+                interactive: true;
+                viewport-height: list-vl.preferred-height;
+
+                list-vl := VerticalLayout {
+                    width: parent.width;
+                    spacing: 2px; alignment: start;
+
+                    // "None" row — always in first position.
+                    Rectangle {
+                        height: 30px;
+                        background: root.current-path == ""
+                            ? Theme.blue.with-alpha(0.15)
+                            : (ta-none.has-hover ? Theme.hover : transparent);
+                        border-radius: 5px;
+                        animate background { duration: 80ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 8px; alignment: start;
+
+                            Text {
+                                text: Tr.prefs-none-label;
+                                color: root.current-path == "" ? Theme.blue : Theme.text;
+                                font-weight: root.current-path == "" ? 700 : 400;
+                                font-size: 11px; vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            if root.current-path == "": Text {
+                                text: "✓";
+                                color: Theme.blue; font-size: 11px; font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        ta-none := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.chosen(-1); root.expanded = false; }
+                        }
+                    }
+
+                    // One row per configured engine.
+                    for engine[idx] in root.engines: Rectangle {
+                        height: 30px;
+                        property <bool> is-active: engine.path == root.current-path;
+                        background: is-active
+                            ? Theme.blue.with-alpha(0.15)
+                            : (ta-row.has-hover ? Theme.hover : transparent);
+                        border-radius: 5px;
+                        animate background { duration: 80ms; }
+
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px;
+                            spacing: 8px; alignment: start;
+
+                            Text {
+                                text: engine.name;
+                                color: is-active ? Theme.blue : Theme.text;
+                                font-weight: is-active ? 700 : 400;
+                                font-size: 11px; vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            if is-active: Text {
+                                text: "✓";
+                                color: Theme.blue; font-size: 11px; font-weight: 700;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        ta-row := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.chosen(idx); root.expanded = false; }
+                        }
+                    }
+                }
+            }
+
+            VScrollbar {
+                content-height: list-flick.viewport-height;
+                view-height: list-flick.height;
+                scroll-y <=> list-flick.viewport-y;
+            }
+        }
+    }
+}
+
+// ── Left-hand tree node ────────────────────────────────────────────
+
+component TreeNode inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool>   selected;
+    callback clicked;
+
+    height: 38px;
+    border-radius: 6px;
+    background: selected
+        ? Theme.blue.with-alpha(0.15)
+        : (ta.has-hover ? Theme.hover : transparent);
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 14px; spacing: 9px; alignment: start;
+
+        Text {
+            text: root.icon;
+            font-size: 13px;
+            vertical-alignment: center;
+            color: root.selected ? Theme.blue : Theme.subtext0;
+        }
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.blue : Theme.text;
+            font-size: 12px;
+            font-weight: root.selected ? 700 : 400;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// ── Engine row in the list (Engines) ────────────────────────────────
+
+component EngineRow inherits Rectangle {
+    in property <string> engine-name;
+    in property <string> engine-path;
+    in property <bool>   selected: false;   // highlighted when options are visible
+    callback remove;
+    callback configure;                     // click on the text area
+
+    // Height increased (56 → 68px, PHASE 79) to fit the 3rd line
+    // of click hint without overlapping the delete button or the
+    // next card.
+    height: 68px;
+    background: root.selected ? Theme.blue.with-alpha(0.09) : Theme.surface0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.selected ? Theme.blue.with-alpha(0.55) : Theme.surface1;
+    animate background   { duration: 120ms; }
+    animate border-color { duration: 120ms; }
+
+    // Click area on the info section (outside the delete button)
+    ta-row := TouchArea {
+        x: 0; y: 0;
+        width: parent.width - 42px; height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.configure(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px;
+        spacing: 8px;
+
+        VerticalLayout {
+            horizontal-stretch: 1; alignment: center;
+
+            Text {
+                text: root.engine-name;
+                color: root.selected ? Theme.blue : Theme.text;
+                font-size: 12px; font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.engine-path;
+                color: Theme.overlay0; font-size: 9px;
+                overflow: elide;
+            }
+            // Permanent click hint (PHASE 79, user request:
+            // the user could not guess that the card had to be clicked
+            // to configure UCI options). Text always visible
+            // (not a hover tooltip): the card lives inside a
+            // scrolling `Flickable` (`moteurs-flick`) that clips anything
+            // overflowing its bounds, so a classic floating tooltip
+            // would risk being cut off near the bottom of the visible area
+            // (same pitfall already encountered with the hint-engine
+            // selector, PHASE 53).
+            Text {
+                text: Tr.prefs-engine-click-hint;
+                color: Theme.yellow; font-size: 9px;
+                overflow: elide;
+            }
+        }
+
+        // Delete button
+        Rectangle {
+            width: 30px; height: 30px; border-radius: 6px;
+            background: ta-rm.has-hover ? Theme.rosewater.with-alpha(0.18) : transparent;
+            animate background { duration: 100ms; }
+
+            Path {
+                width: 11px; height: 11px;
+                x: (parent.width  - self.width)  / 2;
+                y: (parent.height - self.height) / 2;
+                commands: "M1 1 L9 9 M9 1 L1 9";
+                viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                stroke: Theme.overlay0;
+                stroke-width: 1.4px;
+            }
+            ta-rm := TouchArea { mouse-cursor: pointer; clicked => { root.remove(); } }
+        }
+    }
+}
+
+// ── Interactive UCI option ────────────────────────────────────────────────────
+//
+//  Controls depending on type:
+//    spin   → [−] value [+]        (min/max bounds respected)
+//    check  → toggle [ON] / [OFF]
+//    combo  → [◀] value [▶]        (cycles through vars)
+//    button → static label (action reserved for game start)
+//    string → read-only
+//
+//  height = 0 + clip = true when option is non-priority and the accordion is closed
+//  → "invisible" filter within the for loop without needing a second list.
+
+component UciOptInteractive inherits Rectangle {
+    in property <string> opt-name;
+    in property <string> opt-kind;
+    in property <string> opt-value;
+    in property <string> opt-default;
+    in property <int>    opt-min;
+    in property <int>    opt-max;
+    in property <bool>   opt-priority;
+    in property <bool>   show-advanced;
+    // PHASE 57: true if "Apply" detected a non-numeric entry for
+    // this option and reset it to its default value — visual
+    // highlight (red border/background) so the user can clearly see
+    // which one was corrected.
+    in property <bool>   opt-invalid: false;
+
+    callback inc-opt;
+    callback dec-opt;
+    callback set-opt-value(string);  // direct entry → Rust validates + clamps
+    callback toggle-opt;
+    callback prev-opt;
+    callback next-opt;
+
+    // Hides non-priority options when the accordion is closed
+    height: (opt-priority || show-advanced) ? 30px : 0px;
+    clip: true;
+    border-radius: 3px;
+    border-width: opt-invalid ? 1px : 0px;
+    border-color: Theme.red;
+    background: opt-invalid ? Theme.red.with-alpha(0.12) : transparent;
+    animate background, border-width { duration: 120ms; }
+
+    HorizontalLayout {
+        padding-left: 8px; padding-right: 8px; spacing: 6px;
+
+        // ── Option name ───────────────────────────────────────────
+        Text {
+            text: opt-name;
+            color: Theme.text; font-size: 10px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        // ── Spin control: [−] entry/value [+] ───────────────────
+        if opt-kind == "spin": HorizontalLayout {
+            spacing: 4px; alignment: center;
+
+            // − button
+            Rectangle {
+                width: 22px; height: 22px; border-radius: 5px;
+                background: ta-dec.has-hover ? Theme.hover : Theme.surface1;
+                animate background { duration: 80ms; }
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "−"; color: Theme.text; font-size: 15px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-dec := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.dec-opt(); }
+                }
+            }
+
+            // Direct entry field (confirm with Enter)
+            Rectangle {
+                width: 56px; height: 22px; border-radius: 4px;
+                background: spin-in.has-focus ? Theme.mantle : Theme.surface1;
+                border-width: spin-in.has-focus ? 1px : 0px;
+                border-color: Theme.blue;
+                clip: true;
+                animate background   { duration: 80ms; }
+                animate border-color { duration: 80ms; }
+
+                spin-in := TextInput {
+                    // Local alias: `changed` can only react to a
+                    // property declared directly on the element that carries
+                    // the `changed` (compile error obtained when targeting
+                    // `opt-value` directly, a property inherited from the
+                    // parent: "Property 'opt-value' does not exist"). This
+                    // alias, however, is indeed a local property of `spin-in`.
+                    property <string> bound-value: opt-value;
+                    x: 4px; width: parent.width - 8px;
+                    height: parent.height;
+                    text: opt-value;
+                    color: (opt-value != opt-default && opt-default != "")
+                           ? Theme.blue : Theme.text;
+                    font-size: 10px;
+                    font-weight: (opt-value != opt-default && opt-default != "") ? 600 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    // PHASE 58: pushes the entry to the model (draft) on
+                    // every keystroke, not just on Enter — without this,
+                    // "Apply"/"Reset" (which read the model, not this
+                    // `TextInput`) would never see text typed without
+                    // then pressing Enter (user feedback: "the
+                    // numbers I enter don't change"). Never touches
+                    // `self.text` here (unlike the PHASE 55 filter,
+                    // reverted): it only reads its current value to
+                    // forward it, no self-reassignment, hence no
+                    // risk of disrupting the `TextInput`'s internal cycle.
+                    edited => { root.set-opt-value(self.text); }
+                    accepted => { root.set-opt-value(self.text); }
+                    // PHASE 62 (second fix: `changed` can only target
+                    // a property declared directly on the element that
+                    // carries it, never a property merely inherited from the
+                    // parent through lexical scope — hence the local alias
+                    // `bound-value` declared above). `text: opt-value;`
+                    // is a one-way binding permanently broken by
+                    // Slint as soon as the user makes their first interactive
+                    // keystroke (the `TextInput` then writes to its
+                    // own `text` property, which stops any
+                    // automatic re-evaluation from `opt-value`). This
+                    // `changed` explicitly resynchronizes `self.text`
+                    // whenever `bound-value` (i.e. `opt-value`)
+                    // changes for a reason EXTERNAL to typing
+                    // (Reset, "Apply" clamping, selecting a
+                    // different engine) — the `self.text != self.bound-value`
+                    // guard prevents any redundant reassignment during
+                    // typing itself (where `opt-value` is only updated
+                    // as an echo of what was just typed, so already
+                    // identical), thus avoiding disrupting the cursor or
+                    // reproducing the PHASE 55 regression.
+                    changed bound-value => {
+                        if (self.text != self.bound-value) {
+                            self.text = self.bound-value;
+                        }
+                    }
+                }
+            }
+
+            // + button
+            Rectangle {
+                width: 22px; height: 22px; border-radius: 5px;
+                background: ta-inc.has-hover ? Theme.hover : Theme.surface1;
+                animate background { duration: 80ms; }
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "+"; color: Theme.text; font-size: 15px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-inc := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.inc-opt(); }
+                }
+            }
+        }
+
+        // ── Check control: toggle ON / OFF ─────────────────────────
+        if opt-kind == "check": Rectangle {
+            width: 52px; height: 22px; border-radius: 5px;
+            background: opt-value == "true"
+                ? Theme.blue.with-alpha(0.85)
+                : Theme.surface1;
+            animate background { duration: 130ms; }
+            Text {
+                width: parent.width; height: parent.height;
+                text: opt-value == "true" ? "ON" : "OFF";
+                color: opt-value == "true" ? #ffffff : Theme.overlay0;
+                font-size: 10px; font-weight: 700;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            ta-chk := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.toggle-opt(); }
+            }
+        }
+
+        // ── Combo control: [◀] value [▶] ──────────────────────────
+        if opt-kind == "combo": HorizontalLayout {
+            spacing: 3px; alignment: center;
+
+            Rectangle {
+                width: 20px; height: 22px; border-radius: 4px;
+                background: ta-prv.has-hover ? Theme.hover : transparent;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "◀"; color: Theme.text; font-size: 9px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-prv := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.prev-opt(); }
+                }
+            }
+            Text {
+                text: opt-value;
+                min-width: 60px;
+                color: (opt-value != opt-default && opt-default != "")
+                       ? Theme.blue : Theme.text;
+                font-size: 9px;
+                font-weight: (opt-value != opt-default && opt-default != "") ? 600 : 400;
+                horizontal-alignment: center; vertical-alignment: center;
+                overflow: elide;
+            }
+            Rectangle {
+                width: 20px; height: 22px; border-radius: 4px;
+                background: ta-nxt.has-hover ? Theme.hover : transparent;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "▶"; color: Theme.text; font-size: 9px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-nxt := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.next-opt(); }
+                }
+            }
+        }
+
+        // ── Button (sent to the engine at game start) ──────────
+        if opt-kind == "button": Rectangle {
+            width: 80px; height: 22px; border-radius: 5px;
+            background: Theme.surface1;
+            Text {
+                width: parent.width; height: parent.height;
+                text: Tr.prefs-uci-button-at-startup;
+                color: Theme.overlay0; font-size: 8px;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+
+        // ── String (read-only) ────────────────────────────────────
+        if opt-kind == "string": Text {
+            text: opt-value != "" ? opt-value : "—";
+            color: (opt-value != opt-default && opt-default != "")
+                   ? Theme.blue : Theme.subtext0;
+            font-size: 10px;
+            vertical-alignment: center;
+            min-width: 80px;
+            horizontal-alignment: right;
+            overflow: elide;
+        }
+    }
+}
+
+// ── UCI options modal window ────────────────────────────────────────────
+//
+// PHASE 57 (05/07/2026). Extracted from the Engines tab (where it was
+// displayed inline, below the selected engine) into a dedicated modal
+// window, at the user's explicit request: "the area used to set an
+// engine's UCI parameters, extract it and put it in a
+// separate window [...] a modal window that opens on top of
+// Preferences". Faithfully reuses the pattern already proven by
+// `PreferencesPanel` itself (semi-transparent background + centered card
+// with shadow + `clip: true`, background `TouchArea` that closes it,
+// `TouchArea` on the card that stops click propagation, vector close
+// cross) — deliberately chosen over a real separate system window, at
+// the user's request, to stick to a mechanism already used
+// several times in this project (no real multi-window management anywhere
+// else in this project, hence a markedly higher risk without a
+// local compiler).
+component EngineOptionsDialog inherits Rectangle {
+    in property <[UciOptionItem]> options;
+    // PHASE 57: true if "Apply" had to correct at least one invalid
+    // "spin" value on the last click — shows the warning banner.
+    in property <bool> invalid-detected: false;
+
+    callback inc-opt(string);
+    callback dec-opt(string);
+    callback set-opt-value(string, string);
+    callback toggle-opt(string);
+    callback cycle-opt(string, bool);
+    callback validate-clicked;
+    callback cancel-clicked;
+    callback reset-clicked;
+
+    // Specific to this window: restarts at `false` on every (re)opening,
+    // since this component is recreated each time the enclosing
+    // conditional `if` (see instantiation in `PreferencesPanel`) becomes true again.
+    private property <bool> show-advanced: false;
+
+    background: Theme.crust.with-alpha(0.85);
+    TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.cancel-clicked(); }
+    }
+
+    Rectangle {
+        width: 480px; height: 520px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 14px;
+        drop-shadow-blur:     40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+
+        // Stops click propagation (prevents closing via the background)
+        TouchArea { width: parent.width; height: parent.height; }
+
+        VerticalLayout {
+            // ── Header ──────────────────────────────────────────────────
+            Rectangle {
+                height: 50px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 12px;
+
+                    Text {
+                        text: "⚙  " + Tr.prefs-uci-params-title;
+                        color: Theme.text; font-size: 13px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Close button (vector cross, pattern already used
+                    // for `PreferencesPanel` itself) — equivalent to "Cancel".
+                    Rectangle {
+                        width: 30px; height: 30px; border-radius: 6px;
+                        background: ta-x.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Path {
+                            width: 11px; height: 11px;
+                            x: (parent.width  - self.width)  / 2;
+                            y: (parent.height - self.height) / 2;
+                            commands: "M1 1 L9 9 M9 1 L1 9";
+                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                            stroke: Theme.overlay0;
+                            stroke-width: 1.4px;
+                        }
+                        ta-x := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.cancel-clicked(); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface0; }
+
+            // ── Scrolling body ───────────────────────────────────────────
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 4px;
+
+                opts-flick := Flickable {
+                    horizontal-stretch: 1;
+                    interactive: true;
+                    viewport-height: opts-vl.preferred-height;
+
+                    opts-vl := VerticalLayout {
+                        width: parent.width;
+                        padding: 14px; spacing: 8px; alignment: start;
+
+                        // Warning banner (PHASE 57): one or more
+                        // invalid values were reset to their default by
+                        // the last click on "Apply" — the affected rows
+                        // are themselves shown in red (see `UciOptInteractive`).
+                        if root.invalid-detected: Rectangle {
+                            height: 34px;
+                            background: Theme.red.with-alpha(0.12);
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.red;
+
+                            Text {
+                                text: Tr.prefs-invalid-options-reset-msg;
+                                color: Theme.red; font-size: 9px;
+                                wrap: word-wrap;
+                                width: parent.width - 16px;
+                                x: 8px; y: 6px;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+
+                            // Loading indicator
+                            if root.options.length == 0: Text {
+                                text: "⏳ " + Tr.prefs-engine-querying;
+                                color: Theme.overlay0; font-size: 9px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // Option count
+                            if root.options.length > 0: Text {
+                                text: root.options.length + " " + Tr.prefs-options-count-suffix;
+                                color: Theme.overlay0; font-size: 9px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        if root.options.length > 0: Rectangle {
+                            height: 1px; background: Theme.surface0;
+                        }
+
+                        if root.options.length > 0: VerticalLayout {
+                            spacing: 2px;
+
+                            for opt in root.options: UciOptInteractive {
+                                opt-name:     opt.name;
+                                opt-kind:     opt.kind;
+                                opt-value:    opt.value;
+                                opt-default:  opt.default;
+                                opt-min:      opt.min;
+                                opt-max:      opt.max;
+                                opt-priority: opt.priority;
+                                opt-invalid:  opt.invalid;
+                                show-advanced: root.show-advanced;
+                                inc-opt         => { root.inc-opt(opt.name); }
+                                dec-opt         => { root.dec-opt(opt.name); }
+                                set-opt-value(v) => { root.set-opt-value(opt.name, v); }
+                                toggle-opt      => { root.toggle-opt(opt.name); }
+                                prev-opt        => { root.cycle-opt(opt.name, false); }
+                                next-opt        => { root.cycle-opt(opt.name, true); }
+                            }
+
+                            // ── Advanced options toggle ───────────────────
+                            Rectangle {
+                                height: 26px;
+                                border-radius: 5px;
+                                background: ta-adv.has-hover ? Theme.hover : transparent;
+                                animate background { duration: 80ms; }
+
+                                HorizontalLayout {
+                                    padding-left: 8px; spacing: 5px; alignment: start;
+                                    Text {
+                                        text: root.show-advanced ? "▼" : "▶";
+                                        color: Theme.overlay0; font-size: 9px;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.show-advanced
+                                            ? Tr.prefs-hide-advanced-options
+                                            : Tr.prefs-show-advanced-options;
+                                        color: Theme.overlay0; font-size: 9px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                ta-adv := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.show-advanced = !root.show-advanced; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VScrollbar {
+                    content-height: opts-flick.viewport-height;
+                    view-height: opts-flick.height;
+                    scroll-y <=> opts-flick.viewport-y;
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface0; }
+
+            // ── Footer: Reset / Cancel / Apply ─────────
+            Rectangle {
+                height: 56px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    padding: 12px; spacing: 8px; alignment: end;
+
+                    Rectangle {
+                        width: 110px; height: 30px; border-radius: 6px;
+                        background: ta-reset-opts.has-hover
+                            ? Theme.surface1.with-alpha(0.90)
+                            : Theme.surface1.with-alpha(0.70);
+                        animate background { duration: 100ms; }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.prefs-btn-reset-options;
+                            color: Theme.text; font-size: 10px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-reset-opts := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.reset-clicked(); }
+                        }
+                    }
+
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Rectangle {
+                        width: 90px; height: 30px; border-radius: 6px;
+                        background: ta-cancel-opts.has-hover
+                            ? Theme.surface1.with-alpha(0.90)
+                            : Theme.surface1.with-alpha(0.70);
+                        animate background { duration: 100ms; }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.btn-cancel;
+                            color: Theme.text; font-size: 10px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-cancel-opts := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.cancel-clicked(); }
+                        }
+                    }
+                    Rectangle {
+                        width: 90px; height: 30px; border-radius: 6px;
+                        background: ta-validate-opts.has-hover
+                            ? Theme.green.with-alpha(0.85)
+                            : Theme.green.with-alpha(0.70);
+                        animate background { duration: 100ms; }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.posedit-btn-validate;
+                            color: #ffffff; font-size: 10px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-validate-opts := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.validate-clicked(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Complete Preferences panel ───────────────────────────────────────────────
+
+export component PreferencesPanel inherits Rectangle {
+    // Navigation: 0 = Language | 1 = Engines | 2 = Openings | 3 = Puzzles
+    //            | 4 = Appearance | 5 = Reset | 6 = Misc
+    //            | 7 = Game database (PHASE 82)
+    in-out property <int>  active-node:          0;
+    /// Index of the active language in the `Lang::all()` order on the Rust side —
+    /// drives the language dropdown display (bugfix from 03/07/2026).
+    in property <int> current-lang-index: 0;
+    // Index of the selected engine in the list (-1 = none)
+    in-out property <int>  selected-engine-idx: -1;
+    // UCI options of the selected engine (supplied by Rust after query)
+    in-out property <[UciOptionItem]> engine-options: [];
+    // true = shows the reset confirmation prompt
+    private property <bool> confirm-reset:        false;
+    // PHASE 57: true if "Apply" (in `EngineOptionsDialog`) had to correct
+    // at least one invalid "spin" value — drives the warning banner
+    // shown in that same window.
+    in-out property <bool> invalid-options-detected: false;
+
+    // List of configured engines (supplied by Rust from prefs)
+    in property <[SavedEngine]> engines;
+    // Path of the selected hint engine ("" = none)
+    in-out property <string> hint-engine-path: "";
+    // Display name of the selected hint engine ("" = none) — PHASE 52.
+    // Resolved on the Rust side (see `hint_engine_display_name` in main.rs), rather
+    // than searching `engine.path == hint-engine-path` in `root.engines`
+    // here: same principle as `book-name-white`/`book-name-black` below
+    // (Rust directly supplies the label to display, not just a
+    // technical key). Avoids introducing in Slint a lookup
+    // pattern `for ... : if ... : Text {...}` never used elsewhere in this project.
+    in-out property <string> hint-engine-name: "";
+
+    // File name of the loaded Polyglot books ("" = none) — PHASE 15.
+    // The full path is handled on the Rust side (prefs::book_path_white/black);
+    // the panel only needs the display name.
+    in-out property <string> book-name-white: "";
+    in-out property <string> book-name-black: "";
+
+    // Number of puzzles currently in the database (PHASE 14). No database is
+    // shipped with the software — the user imports their own CSV file.
+    in property <int> puzzle-count: 0;
+    /// Overall solving statistics (PHASE 14, Step 8) — text already
+    /// formatted on the Rust side (e.g. "127 attempted · 89 solved · 70%
+    /// success rate"), refreshed live after every attempt.
+    in property <string> puzzle-stats-text: "";
+    /// True while an import is running in the background (PHASE 14, bugfix from
+    /// 03/07/2026) — disables "Import..." and "Unload", shows
+    /// `puzzle-import-status`.
+    in property <bool> puzzle-import-active: false;
+    /// Status text shown during the import (e.g. "12,000 line(s)
+    /// processed…").
+    in property <string> puzzle-import-status: "";
+
+    // PHASE 82 — Reference game databases (browser). Same principle
+    // as the puzzles above: no database is shipped with the software,
+    // the user imports their own file. A new import entirely replaces
+    // the relevant database (decision agreed on in discussion — no
+    // incremental import). Follow-up 11/07/2026: PGN and SCID are now
+    // two independent databases (two distinct `SQLite` files) — importing
+    // or clearing one never touches the other, hence the two counters and the
+    // two Unload/Import pairs below.
+    in property <int> reference-pgn-game-count: 0;
+    in property <int> reference-scid-game-count: 0;
+    in property <bool> reference-import-active: false;
+    /// Status text shown during the import (e.g. "12,000 game(s)
+    /// processed…") — same mechanism as `puzzle-import-status`.
+    in property <string> reference-import-status: "";
+    /// Ratio [0.0, 1.0] for the import progress bar (perf
+    /// bugfix 09/07/2026) — same principle as `tournament-progress` in
+    /// `tournament_panel.slint`.
+    in property <float> reference-import-progress: 0.0;
+
+    /// Debug mode (PHASE 26sexies, "Misc" tab): `true` = JSON logging
+    /// active (`logs/debug_report.jsonl`). Persisted on the Rust side
+    /// (`prefs::{save,load}_debug_mode_enabled`), applied immediately on
+    /// click (no restart needed) via `toggle-debug-mode`.
+    in-out property <bool> debug-mode-enabled: false;
+
+    // Callbacks
+    callback close-panel;
+    callback language-chosen(string);
+    callback browse-add-engine;        // Rust: file dialog → adds an engine
+    callback remove-engine(int);       // Rust: removes the engine at the given index
+    callback reset-prefs;              // Rust: deletes the entire prefs folder
+    callback select-engine(int);       // Rust: queries the UCI options of engine idx
+    callback set-hint-engine(int);     // Rust: sets the hint engine (-1 = none)
+    callback browse-book-white;        // Rust: file dialog → loads/validates the White book
+    callback browse-book-black;        // Rust: file dialog → loads/validates the Black book
+    callback clear-book-white;         // Rust: clears the White book
+    callback clear-book-black;         // Rust: clears the Black book
+    callback import-puzzles;           // Rust: file dialog → imports a CSV of puzzles into the database
+    callback unload-puzzles;           // Rust: Yes/No confirmation → clears puzzles + progress
+    callback import-reference-base;    // Rust: file dialog → (re)imports a PGN into the PGN reference database (PHASE 82)
+    callback import-reference-si4-base; // Rust: file dialog → imports a SCID database (.si4) into the SCID reference database (follow-up 11/07/2026)
+    callback clear-reference-base;     // Rust: Yes/No confirmation → clears the PGN reference database (bugfix 09/07/2026)
+    callback clear-reference-si4-base; // Rust: Yes/No confirmation → clears the SCID reference database (follow-up 11/07/2026)
+    // UCI value changes (PHASE 56: Rust updates ONLY the displayed
+    // model — not engines.json — until "Apply" has been clicked)
+    callback inc-option(string);              // spin: value + 1 (respects max)
+    callback dec-option(string);              // spin: value − 1 (respects min)
+    callback set-option-value(string, string);// spin: direct entry (name, value)
+    callback toggle-option(string);           // check: toggles true ↔ false
+    callback cycle-option(string, bool);      // combo: cycles through vars (true=next)
+    // PHASE 56: applies all options of the selected engine at once —
+    // Rust parses/clamps each "spin" (falls back to default if not numeric),
+    // then persists to engines.json. Since PHASE 57, "Cancel" still
+    // doesn't need a dedicated Rust callback: the options window
+    // simply closes (see `EngineOptionsDialog` below), without
+    // reloading anything — unnecessary since nothing is visible until
+    // it is reopened, at which point `configure` (above) already clears
+    // `engine-options` and re-triggers `select-engine`.
+    callback validate-engine-options;
+    // PHASE 57: resets each option of the displayed model to its default value
+    // (draft, like the other changes — "Apply" must then be clicked
+    // to persist it).
+    callback reset-engine-options;
+    callback toggle-debug-mode(bool);         // Rust: persists + enables/disables the JSON log
+
+    // Semi-transparent background (closes on outside click)
+    background: Theme.crust.with-alpha(0.85);
+    ta-bg := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.close-panel(); }
+    }
+
+    // ── Main card 700 × 540 ────────────────────────────────────────
+    Rectangle {
+        width: 700px; height: 540px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 14px;
+        drop-shadow-blur:     40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+
+        // Stops click propagation (prevents closing via ta-bg)
+        ta-card := TouchArea { width: parent.width; height: parent.height; }
+
+        VerticalLayout {
+
+            // ── Header ──────────────────────────────────────────────────
+            Rectangle {
+                height: 50px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 12px;
+
+                    Text {
+                        text: "⚙  " + Tr.tooltip-prefs;
+                        color: Theme.text; font-size: 14px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    // Close button (vector cross, see CLAUDE_AI.md)
+                    Rectangle {
+                        width: 30px; height: 30px; border-radius: 6px;
+                        background: ta-x.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Path {
+                            width: 12px; height: 12px;
+                            x: (parent.width  - self.width)  / 2;
+                            y: (parent.height - self.height) / 2;
+                            commands: "M1 1 L9 9 M9 1 L1 9";
+                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                            stroke: Theme.overlay0;
+                            stroke-width: 1.4px;
+                        }
+                        ta-x := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close-panel(); }
+                        }
+                    }
+                }
+            }
+
+            // ── Body (sidebar + separator + content) ────────────────────
+            HorizontalLayout {
+                vertical-stretch: 1;
+
+                // Left sidebar
+                Rectangle {
+                    width: 172px;
+                    background: Theme.mantle;
+
+                    VerticalLayout {
+                        padding: 10px; spacing: 4px; alignment: start;
+
+                        TreeNode {
+                            icon: "🌐"; label: Tr.prefs-tab-language;
+                            selected: root.active-node == 0;
+                            clicked => { root.active-node = 0; root.confirm-reset = false; }
+                        }
+                        TreeNode {
+                            icon: "⚙"; label: Tr.prefs-tab-engines;
+                            selected: root.active-node == 1;
+                            clicked => { root.active-node = 1; root.confirm-reset = false; }
+                        }
+                        TreeNode {
+                            icon: "📖"; label: Tr.prefs-tab-openings;
+                            selected: root.active-node == 2;
+                            clicked => { root.active-node = 2; root.confirm-reset = false; }
+                        }
+                        TreeNode {
+                            icon: "🧩"; label: Tr.prefs-tab-puzzles;
+                            selected: root.active-node == 3;
+                            clicked => { root.active-node = 3; root.confirm-reset = false; }
+                        }
+                        TreeNode {
+                            icon: "🎨"; label: Tr.prefs-tab-appearance;
+                            selected: root.active-node == 4;
+                            clicked => { root.active-node = 4; root.confirm-reset = false; }
+                        }
+                        TreeNode {
+                            icon: "↺"; label: Tr.prefs-tab-reset;
+                            selected: root.active-node == 5;
+                            clicked => { root.active-node = 5; }
+                        }
+                        TreeNode {
+                            icon: "🔧"; label: Tr.prefs-tab-misc;
+                            selected: root.active-node == 6;
+                            clicked => { root.active-node = 6; root.confirm-reset = false; }
+                        }
+                        // PHASE 82 — Reference game database (PGN browser).
+                        TreeNode {
+                            icon: "📚"; label: Tr.prefs-tab-reference-base;
+                            selected: root.active-node == 7;
+                            clicked => { root.active-node = 7; root.confirm-reset = false; }
+                        }
+                    }
+                }
+
+                // Vertical separator
+                Rectangle { width: 1px; background: Theme.surface0; }
+
+                // Content area (changes based on active-node)
+                Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+
+                    // ──────────────────── LANGUAGE ─────────────────────────
+                    if root.active-node == 0: VerticalLayout {
+                        padding: 20px; spacing: 12px; alignment: start;
+
+                        Text {
+                            text: "LANGUE / LANGUAGE";
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+
+                        LanguageDropdown {
+                            current-index: root.current-lang-index;
+                            language-chosen(code) => { root.language-chosen(code); }
+                        }
+                    }
+
+                    // ──────────────────── ENGINES ────────────────────────
+                    //
+                    // Ergonomics bugfix from 05/07/2026 (PHASE 53): the "Hint
+                    // engine" selector (dropdown menu, PHASE 52) used to sit at the very
+                    // bottom of the scrolling content below. But this whole
+                    // area (title, engine list, UCI options, hint
+                    // selector) shares the same parent `Rectangle` with `clip: true`
+                    // ("Content area" earlier in this
+                    // file) — when the user scrolled all the way down and
+                    // opened the menu, the dropdown list (which displays over the
+                    // rest, like `LanguageDropdown`) overflowed past this
+                    // `clip` boundary and became invisible. User feedback: "the
+                    // dropdown menu is at the very bottom of the window and when I click
+                    // on it I can't see the list".
+                    //
+                    // Fix: the hint selector was moved out of the `Flickable` and pinned
+                    // to the top of the tab (never affected by scrolling of the
+                    // engine list just below) — it therefore always has
+                    // enough room to open downward, regardless of the
+                    // number of configured engines. More robust than adding arbitrary
+                    // spacing in the scrolling content (a solution considered by
+                    // the user), which would remain dependent on the
+                    // scroll position and window size.
+                    if root.active-node == 1: VerticalLayout {
+                        alignment: start;
+
+                        // Ergonomics bugfix from 05/07/2026 (PHASE 54, immediate follow-up to
+                        // PHASE 53): moving the hint selector out of the `Flickable`
+                        // (PHASE 53) wasn't enough — without an explicit `z`, the stacking
+                        // order between elements that aren't direct siblings follows
+                        // declaration order in the tree: the engine list (declared after, further
+                        // down) painted over the selector's open dropdown list
+                        // (declared before, at the top), making it invisible even though it was
+                        // no longer clipped. User feedback: "the dropdown
+                        // menu list is completely... hidden by the list of available engines".
+                        // Fix: higher `z` on this entire header subtree (a pattern already
+                        // used in this project for the same reason — see `app.slint`,
+                        // main window header, comment "z: 1 → the header paints
+                        // after the content → overflowing tooltips remain visible"). Painting
+                        // this subtree last (thus on top) covers both the closed
+                        // row and its open dropdown list, regardless of its nesting
+                        // depth (`HintEngineDropdown`).
+                        VerticalLayout {
+                            z: 10;
+                            padding: 20px; padding-bottom: 14px; spacing: 8px; alignment: start;
+
+                            Text {
+                                text: Tr.prefs-hint-engine-title;
+                                color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                                letter-spacing: 0.8px;
+                            }
+                            Text {
+                                text: Tr.prefs-hint-engine-explanation;
+                                color: Theme.subtext0; font-size: 9px;
+                                wrap: word-wrap;
+                            }
+
+                            // "None" + configured-engine dropdown menu (PHASE 52) —
+                            // replaces the old one-row/checkbox-per-engine
+                            // presentation, deemed too heavy by the user.
+                            HintEngineDropdown {
+                                engines: root.engines;
+                                current-path: root.hint-engine-path;
+                                current-name: root.hint-engine-name;
+                                chosen(idx) => { root.set-hint-engine(idx); }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.surface1; }
+
+                        HorizontalLayout {
+                        vertical-stretch: 1;
+                        spacing: 4px;
+
+                        moteurs-flick := Flickable {
+                        horizontal-stretch: 1;
+                        interactive: true;
+                        viewport-height: moteurs-vl.preferred-height;
+
+                        moteurs-vl := VerticalLayout {
+                            width: parent.width;
+                            padding: 20px; padding-top: 12px; spacing: 12px; alignment: start;
+
+                            // Title + Add button
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                Text {
+                                    text: Tr.prefs-engines-title;
+                                    color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                                    letter-spacing: 0.8px; vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+
+                                Rectangle {
+                                    width: 100px; height: 28px; border-radius: 6px;
+                                    background: ta-add.has-hover
+                                        ? Theme.blue.with-alpha(0.85)
+                                        : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-add-engine;
+                                        color: #ffffff; font-size: 10px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-add := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.browse-add-engine(); }
+                                    }
+                                }
+                            }
+
+                            // Empty-state message
+                            if root.engines.length == 0: Rectangle {
+                                height: 80px;
+                                background: Theme.surface0;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.surface1;
+
+                                Text {
+                                    width: parent.width - 32px;
+                                    x: 16px;
+                                    y: (parent.height - self.height) / 2;
+                                    text: Tr.prefs-engines-empty;
+                                    color: Theme.red; font-size: 10px;
+                                    wrap: word-wrap;
+                                    horizontal-alignment: left;
+                                }
+                            }
+
+                            // List of engines (selectable)
+                            if root.engines.length > 0: VerticalLayout {
+                                spacing: 6px;
+
+                                for engine[idx] in root.engines: EngineRow {
+                                    engine-name: engine.name;
+                                    engine-path: engine.path;
+                                    selected:    root.selected-engine-idx == idx;
+                                    configure => {
+                                        root.selected-engine-idx = idx;
+                                        // "show-advanced" moved into `EngineOptionsDialog`
+                                        // (PHASE 57): it resets itself to `false` on every
+                                        // opening, since the window is recreated every time
+                                        // `selected-engine-idx` goes from -1 to a value ≥ 0.
+                                        root.invalid-options-detected = false;
+                                        // Clear immediately → Rust will fill it in from the thread
+                                        root.engine-options      = [];
+                                        root.select-engine(idx);
+                                    }
+                                    remove => {
+                                        // Any removal invalidates the current selection
+                                        // (indices shift after removal)
+                                        root.selected-engine-idx = -1;
+                                        root.engine-options      = [];
+                                        root.remove-engine(idx);
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: Tr.prefs-engines-auto-removed-note;
+                                color: Theme.overlay0; font-size: 9px;
+                                wrap: word-wrap;
+                            }
+                        }
+                        }
+
+                        VScrollbar {
+                            content-height: moteurs-flick.viewport-height;
+                            view-height: moteurs-flick.height;
+                            scroll-y <=> moteurs-flick.viewport-y;
+                        }
+                        }
+                    }
+
+                    // ──────────────────── OPENINGS (Polyglot books, PHASE 15) ──
+                    // Dedicated node since PHASE 23 (ergonomics bugfix from 03/07/2026) —
+                    // previously buried at the bottom of the Engines tab.
+                    if root.active-node == 2: VerticalLayout {
+                        padding: 20px; spacing: 12px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-openings-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+                        Text {
+                            text: Tr.prefs-openings-explanation;
+                            color: Theme.subtext0; font-size: 9px;
+                            wrap: word-wrap;
+                        }
+
+                        // White row
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.surface0;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 8px; alignment: start;
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Image {
+                                        source: @image-url("../assets/pieces/wK.svg");
+                                        width: 14px; height: 14px;
+                                        image-fit: contain;
+                                    }
+                                    Text {
+                                        text: Tr.board-white;
+                                        color: Theme.subtext0; font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: root.book-name-white == "" ? Tr.prefs-none-label : root.book-name-white;
+                                    color: root.book-name-white == "" ? Theme.overlay0 : Theme.text;
+                                    font-size: 11px; vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                Rectangle {
+                                    width: 78px; height: 24px; border-radius: 5px;
+                                    background: ta-book-w.has-hover
+                                        ? Theme.blue.with-alpha(0.85)
+                                        : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-load;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-book-w := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.browse-book-white(); }
+                                    }
+                                }
+
+                                if root.book-name-white != "": Rectangle {
+                                    width: 22px; height: 22px; border-radius: 5px;
+                                    background: ta-book-w-clear.has-hover
+                                        ? Theme.red.with-alpha(0.30)
+                                        : transparent;
+                                    animate background { duration: 100ms; }
+
+                                    Path {
+                                        width: 10px; height: 10px;
+                                        x: (parent.width  - self.width)  / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        commands: "M1 1 L9 9 M9 1 L1 9";
+                                        viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                                        stroke: Theme.red;
+                                        stroke-width: 1.6px;
+                                    }
+                                    ta-book-w-clear := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.clear-book-white(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Black row
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.surface0;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 8px; alignment: start;
+
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Image {
+                                        source: @image-url("../assets/pieces/bK.svg");
+                                        width: 14px; height: 14px;
+                                        image-fit: contain;
+                                    }
+                                    Text {
+                                        text: Tr.board-black;
+                                        color: Theme.subtext0; font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: root.book-name-black == "" ? Tr.prefs-none-label : root.book-name-black;
+                                    color: root.book-name-black == "" ? Theme.overlay0 : Theme.text;
+                                    font-size: 11px; vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                Rectangle {
+                                    width: 78px; height: 24px; border-radius: 5px;
+                                    background: ta-book-b.has-hover
+                                        ? Theme.blue.with-alpha(0.85)
+                                        : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-load;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-book-b := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.browse-book-black(); }
+                                    }
+                                }
+
+                                if root.book-name-black != "": Rectangle {
+                                    width: 22px; height: 22px; border-radius: 5px;
+                                    background: ta-book-b-clear.has-hover
+                                        ? Theme.red.with-alpha(0.30)
+                                        : transparent;
+                                    animate background { duration: 100ms; }
+
+                                    Path {
+                                        width: 10px; height: 10px;
+                                        x: (parent.width  - self.width)  / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        commands: "M1 1 L9 9 M9 1 L1 9";
+                                        viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                                        stroke: Theme.red;
+                                        stroke-width: 1.6px;
+                                    }
+                                    ta-book-b-clear := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.clear-book-black(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ──────────────────── PUZZLES (training, PHASE 14) ──
+                    // Dedicated node since PHASE 23 (ergonomics bugfix from 03/07/2026) —
+                    // previously buried at the bottom of the Engines tab.
+                    if root.active-node == 3: VerticalLayout {
+                        padding: 20px; spacing: 12px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-puzzles-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+                        Text {
+                            text: Tr.prefs-puzzles-explanation;
+                            color: Theme.subtext0; font-size: 9px;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.surface0;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 8px; alignment: start;
+
+                                Text {
+                                    text: root.puzzle-count > 0
+                                        ? "\{root.puzzle-count} " + Tr.prefs-puzzles-count-suffix
+                                        : Tr.prefs-puzzles-none-imported;
+                                    color: root.puzzle-count > 0 ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                // "Unload": clears the puzzle database without going through
+                                // a full reset (bugfix from 03/07/2026).
+                                // Grayed out if there's nothing to unload, or during an import.
+                                if root.puzzle-count > 0: Rectangle {
+                                    width: 88px; height: 24px; border-radius: 5px;
+                                    background: root.puzzle-import-active
+                                        ? Theme.red.with-alpha(0.30)
+                                        : ta-puzzles-unload.has-hover
+                                            ? Theme.red.with-alpha(0.85)
+                                            : Theme.red.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-unload;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-puzzles-unload := TouchArea {
+                                        mouse-cursor: root.puzzle-import-active ? default : pointer;
+                                        enabled: !root.puzzle-import-active;
+                                        clicked => { root.unload-puzzles(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 110px; height: 24px; border-radius: 5px;
+                                    background: root.puzzle-import-active
+                                        ? Theme.blue.with-alpha(0.30)
+                                        : ta-puzzles.has-hover
+                                            ? Theme.blue.with-alpha(0.85)
+                                            : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-import;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-puzzles := TouchArea {
+                                        mouse-cursor: root.puzzle-import-active ? default : pointer;
+                                        enabled: !root.puzzle-import-active;
+                                        clicked => { root.import-puzzles(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Import status (PHASE 14, bugfix from 03/07/2026) ──
+                        // Slight opacity pulse to signal an operation in
+                        // progress without building an actual graphical spinner.
+                        if root.puzzle-import-active: status-pulse := Text {
+                            text: root.puzzle-import-status;
+                            color: Theme.blue; font-size: 10px; font-weight: 600;
+                            overflow: elide;
+
+                            property <bool> pulse-on: true;
+                            opacity: status-pulse.pulse-on ? 1.0 : 0.4;
+                            animate opacity { duration: 700ms; easing: ease-in-out; }
+
+                            Timer {
+                                interval: 700ms;
+                                running: true;
+                                triggered => { status-pulse.pulse-on = !status-pulse.pulse-on; }
+                            }
+                        }
+
+                        // ── Solving statistics (PHASE 14, Step 8) ──
+                        if !root.puzzle-import-active: Text {
+                            text: root.puzzle-stats-text;
+                            color: Theme.subtext0; font-size: 10px;
+                            overflow: elide;
+                        }
+                    }
+
+                    // ──────────────── GAME DATABASE (PHASE 82) ─────────
+                    // Same layout as the Puzzles tab above (counter +
+                    // Import button + pulsing status during import), PLUS an
+                    // "Unload" button (bugfix 09/07/2026, user feedback:
+                    // its absence was noticed) — a new import already
+                    // entirely replaces the existing database, but the user must also
+                    // be able to clear it without going through an import.
+                    if root.active-node == 7: VerticalLayout {
+                        padding: 20px; spacing: 12px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-reference-base-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+                        Text {
+                            text: Tr.prefs-reference-base-explanation;
+                            color: Theme.subtext0; font-size: 9px;
+                            wrap: word-wrap;
+                        }
+
+                        // Follow-up 11/07/2026: two independent areas (PGN and
+                        // SCID have been two distinct `SQLite` files since
+                        // this date, see the "two databases" discussion —
+                        // importing/clearing one never touches the other).
+                        // Import/clear remain mutually exclusive
+                        // (shared `reference-import-active`): only one at a
+                        // time, regardless of which database is affected.
+                        Text {
+                            text: "PGN";
+                            color: Theme.overlay0; font-size: 8px; font-weight: 700;
+                            letter-spacing: 0.6px;
+                        }
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.surface0;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 8px; alignment: start;
+
+                                Text {
+                                    text: root.reference-pgn-game-count > 0
+                                        ? "\{root.reference-pgn-game-count} " + Tr.prefs-reference-base-count-suffix
+                                        : Tr.prefs-reference-base-none-imported;
+                                    color: root.reference-pgn-game-count > 0 ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                // "Unload": clears the PGN reference database
+                                // (bugfix 09/07/2026). Grayed out if there's nothing to
+                                // unload, or during an import — same pattern
+                                // as Puzzles above.
+                                if root.reference-pgn-game-count > 0: Rectangle {
+                                    width: 88px; height: 24px; border-radius: 5px;
+                                    background: root.reference-import-active
+                                        ? Theme.red.with-alpha(0.30)
+                                        : ta-reference-clear.has-hover
+                                            ? Theme.red.with-alpha(0.85)
+                                            : Theme.red.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-unload;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-reference-clear := TouchArea {
+                                        mouse-cursor: root.reference-import-active ? default : pointer;
+                                        enabled: !root.reference-import-active;
+                                        clicked => { root.clear-reference-base(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 125px; height: 24px; border-radius: 5px;
+                                    background: root.reference-import-active
+                                        ? Theme.blue.with-alpha(0.30)
+                                        : ta-reference-base.has-hover
+                                            ? Theme.blue.with-alpha(0.85)
+                                            : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-import-pgn;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-reference-base := TouchArea {
+                                        mouse-cursor: root.reference-import-active ? default : pointer;
+                                        enabled: !root.reference-import-active;
+                                        clicked => { root.import-reference-base(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // SCID area (follow-up 11/07/2026): same layout as
+                        // the PGN area above, distinct file and counter.
+                        Text {
+                            text: "SCID";
+                            color: Theme.overlay0; font-size: 8px; font-weight: 700;
+                            letter-spacing: 0.6px;
+                        }
+                        Rectangle {
+                            height: 32px;
+                            background: Theme.surface0;
+                            border-radius: 6px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 6px;
+                                spacing: 8px; alignment: start;
+
+                                Text {
+                                    text: root.reference-scid-game-count > 0
+                                        ? "\{root.reference-scid-game-count} " + Tr.prefs-reference-base-count-suffix
+                                        : Tr.prefs-reference-base-none-imported;
+                                    color: root.reference-scid-game-count > 0 ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                if root.reference-scid-game-count > 0: Rectangle {
+                                    width: 88px; height: 24px; border-radius: 5px;
+                                    background: root.reference-import-active
+                                        ? Theme.red.with-alpha(0.30)
+                                        : ta-reference-si4-clear.has-hover
+                                            ? Theme.red.with-alpha(0.85)
+                                            : Theme.red.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-unload;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-reference-si4-clear := TouchArea {
+                                        mouse-cursor: root.reference-import-active ? default : pointer;
+                                        enabled: !root.reference-import-active;
+                                        clicked => { root.clear-reference-si4-base(); }
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 130px; height: 24px; border-radius: 5px;
+                                    background: root.reference-import-active
+                                        ? Theme.blue.with-alpha(0.30)
+                                        : ta-reference-si4.has-hover
+                                            ? Theme.blue.with-alpha(0.85)
+                                            : Theme.blue.with-alpha(0.70);
+                                    animate background { duration: 100ms; }
+
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.prefs-btn-import-si4;
+                                        color: #ffffff; font-size: 9px; font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    ta-reference-si4 := TouchArea {
+                                        mouse-cursor: root.reference-import-active ? default : pointer;
+                                        enabled: !root.reference-import-active;
+                                        clicked => { root.import-reference-si4-base(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Import status (same pulse as Puzzles) +
+                        // progress bar (perf bugfix 09/07/2026,
+                        // user request: since the total is known from the
+                        // first call, a real bar is possible — same
+                        // pattern as `TournamentPanel`, see
+                        // `tournament_panel.slint`). ──
+                        if root.reference-import-active: VerticalLayout {
+                            spacing: 6px;
+
+                            reference-status-pulse := Text {
+                                text: root.reference-import-status;
+                                color: Theme.blue; font-size: 10px; font-weight: 600;
+                                overflow: elide;
+
+                                property <bool> pulse-on: true;
+                                opacity: reference-status-pulse.pulse-on ? 1.0 : 0.4;
+                                animate opacity { duration: 700ms; easing: ease-in-out; }
+
+                                Timer {
+                                    interval: 700ms;
+                                    running: true;
+                                    triggered => { reference-status-pulse.pulse-on = !reference-status-pulse.pulse-on; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 4px;
+                                border-radius: 2px;
+                                background: Theme.surface1;
+                                Rectangle {
+                                    x: 0; y: 0; height: 4px; border-radius: 2px;
+                                    background: Theme.blue;
+                                    width: parent.width * root.reference-import-progress;
+                                    animate width { duration: 300ms; easing: ease-out; }
+                                }
+                            }
+                        }
+                    }
+
+                    // ──────────────────── RESET ──────────────────
+                    if root.active-node == 5 && !root.confirm-reset: VerticalLayout {
+                        padding: 20px; spacing: 16px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-reset-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+
+                        Rectangle {
+                            height: 90px;
+                            background: Theme.surface0;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Theme.surface1;
+
+                            Text {
+                                width: parent.width - 32px;
+                                x: 16px; y: (parent.height - self.height) / 2;
+                                text: Tr.prefs-reset-explanation;
+                                color: Theme.overlay0; font-size: 10px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 240px; height: 34px; border-radius: 7px;
+                            background: ta-rst.has-hover
+                                ? Theme.rosewater.with-alpha(0.85)
+                                : Theme.rosewater.with-alpha(0.70);
+                            animate background { duration: 100ms; }
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "↺  " + Tr.prefs-reset-button;
+                                color: #ffffff; font-size: 11px; font-weight: 600;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            ta-rst := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.confirm-reset = true; }
+                            }
+                        }
+                    }
+
+                    // ──────────────────── RESET CONFIRMATION ─────────────
+                    if root.active-node == 5 && root.confirm-reset: VerticalLayout {
+                        padding: 20px; spacing: 14px; alignment: center;
+
+                        Text {
+                            text: "⚠";
+                            font-size: 32px; color: Theme.rosewater;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: Tr.prefs-reset-confirm-title;
+                            color: Theme.text; font-size: 14px; font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: Tr.prefs-reset-confirm-body;
+                            color: Theme.overlay0; font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 10px; alignment: center;
+
+                            Rectangle {
+                                width: 100px; height: 34px; border-radius: 7px;
+                                background: ta-no-r.has-hover ? Theme.hover : Theme.surface0;
+                                animate background { duration: 100ms; }
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: Tr.wizard-btn-no; color: Theme.text; font-size: 11px;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                ta-no-r := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.confirm-reset = false; }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 170px; height: 34px; border-radius: 7px;
+                                background: ta-yes-r.has-hover
+                                    ? Theme.rosewater.with-alpha(0.85)
+                                    : Theme.rosewater;
+                                animate background { duration: 100ms; }
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: Tr.prefs-btn-yes-reset; color: #ffffff;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                ta-yes-r := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.reset-prefs(); }
+                                }
+                            }
+                        }
+                    }
+
+                    // ──────────────────── APPEARANCE ──────────────────────
+                    if root.active-node == 4: VerticalLayout {
+                        padding: 20px; spacing: 16px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-appearance-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+
+                            Text {
+                                text: Tr.prefs-theme-label;
+                                color: Theme.text; font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // Dark / light toggle
+                            Rectangle {
+                                width: 110px; height: 34px; border-radius: 8px;
+                                background: ta-thm.has-hover ? Theme.hover : Theme.surface0;
+                                border-width: 1px;
+                                border-color: Theme.surface1;
+                                animate background { duration: 100ms; }
+
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    spacing: 6px; alignment: center;
+
+                                    Text {
+                                        text: Theme.is-dark ? "☀" : "☾";
+                                        font-size: 14px; color: Theme.text;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: Theme.is-dark ? Tr.prefs-theme-light : Tr.prefs-theme-dark;
+                                        color: Theme.text; font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                ta-thm := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { Theme.is-dark = !Theme.is-dark; }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.surface0; }
+
+                        Text {
+                            text: Tr.prefs-appearance-more-soon;
+                            color: Theme.overlay0; font-size: 10px;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    // ──────────────────── MISC (PHASE 26sexies) ────────
+                    if root.active-node == 6: VerticalLayout {
+                        padding: 20px; spacing: 16px; alignment: start;
+
+                        Text {
+                            text: Tr.prefs-misc-title;
+                            color: Theme.overlay0; font-size: 9px; font-weight: 700;
+                            letter-spacing: 0.8px;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 12px; alignment: start;
+
+                            Text {
+                                text: Tr.debug-mode-label;
+                                color: Theme.text; font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // ON / OFF toggle (same style as the dark/light theme)
+                            Rectangle {
+                                width: 110px; height: 34px; border-radius: 8px;
+                                background: ta-dbg.has-hover ? Theme.hover : Theme.surface0;
+                                border-width: 1px;
+                                border-color: Theme.surface1;
+                                animate background { duration: 100ms; }
+
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px;
+                                    spacing: 6px; alignment: center;
+
+                                    Text {
+                                        text: root.debug-mode-enabled ? "●" : "○";
+                                        font-size: 14px;
+                                        color: root.debug-mode-enabled ? Theme.rosewater : Theme.text;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.debug-mode-enabled ? Tr.wizard-state-active : Tr.wizard-state-inactive;
+                                        color: Theme.text; font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                ta-dbg := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.debug-mode-enabled = !root.debug-mode-enabled;
+                                        root.toggle-debug-mode(root.debug-mode-enabled);
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Theme.surface0; }
+
+                        Text {
+                            text: Tr.debug-mode-explanation;
+                            color: Theme.overlay0; font-size: 10px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            // ── Footer ─────────────────────────────────────────────
+            Rectangle {
+                height: 50px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    alignment: end;
+                    padding-right: 16px;
+
+                    Rectangle {
+                        width: 90px; height: 32px; border-radius: 7px;
+                        background: ta-close.has-hover ? Theme.hover : Theme.surface0;
+                        animate background { duration: 100ms; }
+
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.btn-close; color: Theme.text; font-size: 11px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-close := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close-panel(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── UCI options modal window (PHASE 57) ────────────────────────
+    // Declared last (thus painted over everything else in this
+    // component, including the main card above) — same lesson as
+    // PHASE 54 (stacking follows declaration order, not just
+    // `z` within the same direct parent).
+    if root.selected-engine-idx >= 0: EngineOptionsDialog {
+        options: root.engine-options;
+        invalid-detected: root.invalid-options-detected;
+        inc-opt(name)          => { root.inc-option(name); }
+        dec-opt(name)          => { root.dec-option(name); }
+        set-opt-value(name, v) => { root.set-option-value(name, v); }
+        toggle-opt(name)       => { root.toggle-option(name); }
+        cycle-opt(name, fw)    => { root.cycle-option(name, fw); }
+        // PHASE 59: closes the window after "Apply", EXCEPT if at least one
+        // invalid value was just detected and corrected — in that case
+        // it's left open so the user can see the red row and
+        // the warning message. `root.validate-engine-options()` is a
+        // synchronous Rust call: `invalid-options-detected` is already up to date
+        // by the very next line (user feedback: "apply doesn't even
+        // close the window").
+        validate-clicked       => {
+            root.validate-engine-options();
+            if !root.invalid-options-detected {
+                root.selected-engine-idx = -1;
+                root.engine-options      = [];
+            }
+        }
+        reset-clicked          => { root.reset-engine-options(); }
+        cancel-clicked         => {
+            root.selected-engine-idx      = -1;
+            root.engine-options           = [];
+            root.invalid-options-detected = false;
+        }
+    }
+}

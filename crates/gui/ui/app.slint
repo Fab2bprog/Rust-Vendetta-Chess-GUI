@@ -1,0 +1,3118 @@
+// Main window of Vendetta Chess GUI.
+//
+// Phases:
+//   6.3–6.7 — skeleton, board, moves, analysis
+//   7.1     — responsive layout
+//   7.2     — board coordinates
+//   7.3     — light/dark theme (Catppuccin Mocha ↔ Latte)
+//   7.4     — modern style: rounded corners, shadows, hover, spacing
+//   7.7     — promotion modal + end-of-game banner
+
+import { Tr }                          from "translations.slint";
+import { Theme }                       from "theme.slint";
+import { ChessBoard, SquareData }      from "board.slint";
+import { MoveList, MoveRow }           from "move_list.slint";
+import { CapturedPiecesBar, CapturedPieceData } from "captured_bar.slint";
+import { ScoreGraph, ScoreBar }        from "score_graph.slint";
+import { SavedEngine, UciOptionItem, TournamentStanding, PvLine } from "types.slint";
+import { GameSetupWizard, GameSetupRecap }     from "game_setup.slint";
+import { LanguageSetupScreen }                 from "language_setup.slint";
+import { PreferencesPanel }                    from "preferences.slint";
+import { TournamentSetupWizard }               from "tournament_setup.slint";
+import { TournamentPanel }                     from "tournament_panel.slint";
+import { PositionEditor }                      from "position_editor.slint";
+import { ReferenceBrowser, ReferenceGameListRow, OpeningMoveRow } from "reference_browser.slint";
+import { GameDetailView, GameDetailMoveRow } from "game_detail.slint";
+import { TooltipIconButton } from "tooltip_icon_button.slint";
+
+export { Tr }
+export { Theme }
+export { SquareData }
+export { MoveRow }
+export { CapturedPieceData }
+export { ScoreBar }
+export { SavedEngine }
+export { UciOptionItem }
+export { TournamentStanding }
+export { PvLine }
+export { ReferenceGameListRow }
+export { OpeningMoveRow }
+export { GameDetailMoveRow }
+
+// ── Helper components ─────────────────────────────────────────────────────────
+
+// `TooltipIconButton` was extracted into `tooltip_icon_button.slint` on
+// 10/07/2026 (reused from `game_detail.slint`, see import
+// above) — all call sites below remain unchanged.
+
+/// A piece button for the promotion modal.
+///
+/// Uses the same SVGs as the board (`../assets/pieces/*.svg`) rather
+/// than a Unicode glyph + `font-family: "Apple Symbols"` (macOS only,
+/// and in any case subject to the same missing-glyph issue as ♔/♚/✕
+/// elsewhere in the app — see note in `CLAUDE_AI.md`).
+component PieceButton inherits Rectangle {
+    in property <image> piece-image;
+    callback clicked;
+
+    width: 54px; height: 54px;
+    border-radius: 8px;
+    background: ta.has-hover ? Theme.hover : Theme.surface1;
+    drop-shadow-blur:     ta.has-hover ? 8px : 2px;
+    drop-shadow-offset-y: ta.has-hover ? 3px : 1px;
+    drop-shadow-color: Theme.shadow;
+
+    Image {
+        source: piece-image;
+        width: parent.width * 0.72; height: parent.height * 0.72;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+/// Pawn promotion modal: 4 clickable pieces on a semi-transparent background.
+component PromotionModal inherits Rectangle {
+    in property <bool> is-white;
+    callback piece-chosen(int);   // 1=Queen  2=Rook  3=Bishop  4=Knight
+
+    // Semi-transparent background covering the board area
+    background: Theme.crust.with-alpha(0.72);
+
+    // Central panel
+    Rectangle {
+        width: 256px; height: 110px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.surface0;
+        border-radius: 12px;
+        drop-shadow-blur: 24px; drop-shadow-offset-y: 6px;
+        drop-shadow-color: Theme.shadow;
+
+        VerticalLayout {
+            padding: 10px; spacing: 8px; alignment: center;
+
+            Text {
+                text: Tr.promo-choose;
+                color: Theme.overlay0; font-size: 10px; font-weight: 600;
+                letter-spacing: 0.5px;
+                horizontal-alignment: center;
+            }
+
+            HorizontalLayout {
+                spacing: 6px; alignment: center;
+
+                PieceButton {
+                    piece-image: is-white ? @image-url("../assets/pieces/wQ.svg") : @image-url("../assets/pieces/bQ.svg");
+                    clicked => { root.piece-chosen(1); }
+                }
+                PieceButton {
+                    piece-image: is-white ? @image-url("../assets/pieces/wR.svg") : @image-url("../assets/pieces/bR.svg");
+                    clicked => { root.piece-chosen(2); }
+                }
+                PieceButton {
+                    piece-image: is-white ? @image-url("../assets/pieces/wB.svg") : @image-url("../assets/pieces/bB.svg");
+                    clicked => { root.piece-chosen(3); }
+                }
+                PieceButton {
+                    piece-image: is-white ? @image-url("../assets/pieces/wN.svg") : @image-url("../assets/pieces/bN.svg");
+                    clicked => { root.piece-chosen(4); }
+                }
+            }
+        }
+    }
+}
+
+/// Right-click context menu on a move — PHASE 16, Steps 6.1 (NAG), 6.2 (promote
+/// to main line / delete variation) and 6.3 (inline
+/// comment, limited to the main line — see `comment-picked`).
+///
+/// Same style as `PromotionModal` (semi-transparent background + centered panel):
+/// precise cursor-based positioning deliberately not handled here (first
+/// use of right-click in this project, no precedent for a dynamically
+/// positioned popup — see SUIVI_PLAN_ACTION.md) — a centered panel,
+/// consistent with all other overlays in the application, is safer
+/// without being able to visually verify the rendering.
+component NagContextMenu inherits Rectangle {
+    in property <string> move-label: "";
+    /// PHASE 16, Step 6.2: `true` if the targeted move belongs to a
+    /// variation (never the main line) — determined statically on the
+    /// `.slint` side based on the originating element of the right-click (see
+    /// `move_list.slint`), without needing to query `GameController`.
+    /// Controls the display of "Promote to main line"/"Delete
+    /// this variation" (decision 7: never offered for a move on the
+    /// main line).
+    in property <bool> is-variation: false;
+
+    callback nag-picked(int);   // NAG code 1..6, see chess_core::game_tree::Nag
+    // PHASE 16, Step 6.2: "Promote to main line" / "Delete
+    // this variation" — visible only if `is-variation` is true.
+    callback promote-picked();
+    callback delete-picked();
+    // PHASE 16, Step 6.3: "Add a comment" — visible only
+    // if `!is-variation` (decision made on 04/07/2026: comments
+    // limited to the main line for this step, never for variations,
+    // unlike the original decision 7 which imposed no such
+    // restriction — explicit deferral to limit the risk of a step
+    // already flagged as the most uncertain of the three, with no
+    // compiler access to verify an inline text edit under a collapsed
+    // variation block).
+    callback comment-picked();
+    callback closed();
+
+    // Glyphs sorted by polarity (decision 7) with their associated standard
+    // PGN NAG code (index-to-index): !!=3 !=1 !?=5 ?!=6 ?=2 ??=4.
+    property <[string]> nag-symbols: ["!!", "!", "!?", "?!", "?", "??"];
+    property <[int]>    nag-codes:   [3, 1, 5, 6, 2, 4];
+    // Labels (index-to-index with `nag-symbols`) shown in a tooltip on hover
+    // — user ergonomics feedback from 04/07/2026: the raw glyphs
+    // ("!!", "?!"...) aren't understandable without explanation.
+    property <[string]> nag-tooltips: [
+        Tr.tooltip-nag-brilliant,
+        Tr.tooltip-nag-good,
+        Tr.tooltip-nag-interesting,
+        Tr.tooltip-nag-dubious,
+        Tr.tooltip-nag-mistake,
+        Tr.tooltip-nag-blunder,
+    ];
+
+    // Semi-transparent background — clicking it closes the menu.
+    background: Theme.crust.with-alpha(0.55);
+    TouchArea { clicked => { root.closed(); } }
+
+    Rectangle {
+        width: 260px;
+        height: root.is-variation ? 252px : 186px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.surface0;
+        border-radius: 12px;
+        drop-shadow-blur: 24px; drop-shadow-offset-y: 6px;
+        drop-shadow-color: Theme.shadow;
+
+        // Prevents a click on the panel itself from closing the menu (same
+        // pattern as the other modals in this file).
+        TouchArea { clicked => { } }
+
+        VerticalLayout {
+            padding: 12px; spacing: 10px; alignment: center;
+
+            Text {
+                text: root.move-label;
+                color: Theme.text; font-size: 13px; font-weight: 700;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+
+            HorizontalLayout {
+                spacing: 4px; alignment: center;
+
+                for symbol[i] in root.nag-symbols: Rectangle {
+                    width: 32px; height: 32px;
+                    border-radius: 6px;
+                    background: ta-nag.has-hover ? Theme.hover : Theme.surface1;
+
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: symbol;
+                        color: Theme.text; font-size: 13px; font-weight: 600;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+
+                    // Hover help bubble — same pattern as
+                    // `TooltipIconButton`, shown above the button
+                    // (not below: the space right below is taken up
+                    // by the other context menu entries).
+                    if ta-nag.has-hover: Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: -27px;
+                        width: tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.surface1;
+                        border-radius: 4px;
+                        drop-shadow-blur: 4px;
+                        drop-shadow-color: Theme.shadow;
+                        z: 200;
+
+                        tip := Text {
+                            width: parent.width; height: parent.height;
+                            text: root.nag-tooltips[i];
+                            color: Theme.text;
+                            font-size: 11px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+
+                    ta-nag := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.nag-picked(root.nag-codes[i]); }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface1; }
+
+            // ── Comment (PHASE 16, Step 6.3) — main line only ──
+            if !root.is-variation: Rectangle {
+                width: 236px; height: 32px;
+                border-radius: 6px;
+                background: ta-comment.has-hover ? Theme.hover : Theme.surface1;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: Tr.app-nag-add-comment;
+                    color: Theme.text; font-size: 10px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-comment := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.comment-picked(); }
+                }
+            }
+
+            // ── Promote / delete variation (PHASE 16, Step 6.2) ──
+            if root.is-variation: Rectangle {
+                width: 236px; height: 36px;
+                border-radius: 6px;
+                background: ta-promote.has-hover ? Theme.hover : Theme.surface1;
+                Text {
+                    x: 4px;
+                    width: parent.width - 8px; height: parent.height;
+                    text: Tr.app-nag-promote-variation;
+                    color: Theme.text; font-size: 10px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+                ta-promote := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.promote-picked(); }
+                }
+            }
+
+            if root.is-variation: Rectangle {
+                width: 236px; height: 30px;
+                border-radius: 6px;
+                background: ta-delete.has-hover ? Theme.red.with-alpha(0.22) : Theme.surface1;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: Tr.app-nag-delete-variation;
+                    color: Theme.red; font-size: 11px; font-weight: 600;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-delete := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.delete-picked(); }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.surface1; }
+
+            Rectangle {
+                width: 90px; height: 26px;
+                border-radius: 6px;
+                background: ta-close.has-hover ? Theme.hover : Theme.surface1;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: Tr.btn-close;
+                    color: Theme.text; font-size: 11px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                ta-close := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.closed(); }
+                }
+            }
+        }
+    }
+}
+
+/// Vertical evaluation bar — pushes from the center toward the winning side.
+///
+/// Convention (follows board orientation):
+///   - White at bottom (normal)  + White winning → pushes DOWN
+///   - White at top (flipped) + White winning → pushes UP
+///   - XOR logic: fills-down = (white-wins) != flipped
+///
+/// `fraction`: 0.0 = total Black win · 0.5 = equal · 1.0 = total White win.
+/// `flipped`: true = board flipped (White at top).
+/// Fixed colors independent of the theme (game colors, not UI colors).
+component EvalBar inherits Rectangle {
+    in property <float> fraction: 0.5;
+    in property <bool>  flipped:  false;
+
+    border-radius: 4px;
+    clip: true;
+    background: #5a5a6e;   // neutral blue-gray — reference background
+
+    // ── Advantage indicator ─────────────────────────────────────────────
+    // Pushes from the center toward the winning side.
+    //
+    // fills-down (explicit XOR, avoids != on bool in Slint):
+    //   White winning + not flipped → down ✓
+    //   White winning + flipped     → up   ✓
+    //   Black winning + not flipped → up   ✓
+    //   Black winning + flipped     → down ✓
+    //
+    // All computed properties are inlined with root. to remove
+    // any Slint scoping ambiguity in child elements.
+    Rectangle {
+        width: parent.width;
+
+        // Height = advantage from center (0 = equal, height = checkmate)
+        height: root.fraction >= 0.5
+            ? parent.height * (root.fraction - 0.5) * 2.0
+            : parent.height * (0.5 - root.fraction) * 2.0;
+
+        // Y origin: center (pushes down) or center-height (pushes up)
+        y: (root.fraction >= 0.5 && !root.flipped) || (root.fraction < 0.5 && root.flipped)
+            ? parent.height / 2
+            : root.fraction >= 0.5
+                ? parent.height / 2 - parent.height * (root.fraction - 0.5) * 2.0
+                : parent.height / 2 - parent.height * (0.5 - root.fraction) * 2.0;
+
+        background: root.fraction >= 0.5 ? #f0ede0   // cream = White
+                                         : #1a1828;  // near-black = Black
+        animate height { duration: 450ms; easing: ease-in-out; }
+        animate y      { duration: 450ms; easing: ease-in-out; }
+    }
+
+    // ── Equality line (middle, always visible) ────────────────────────
+    Rectangle {
+        x: 0px;
+        y: parent.height / 2 - 0.5px;
+        width:  parent.width;
+        height: 1px;
+        background: #cccccc;
+        opacity: 0.65;
+    }
+}
+
+/// End-of-game banner — non-blocking horizontal bar.
+///
+/// Design: compact strip (≈60px) at the top of the board area.
+/// The board remains visible and interactive below.
+/// The animation (slide + fade) is handled by the caller via the animated
+/// `y` and `opacity` properties, not here — the component is always instantiated.
+component GameOverBanner inherits Rectangle {
+    in property <string> result-text;    // e.g. "White wins"
+    in property <string> reason-text;    // e.g. "Checkmate"
+    in property <bool>   active: false;  // true = game over (enables clicks)
+    callback new-game();
+
+    height: 60px;
+    background: Theme.surface0.with-alpha(0.96);
+    // Rounded corners at the bottom only (the top sits outside the clip when hidden)
+    border-radius: 8px;
+    drop-shadow-blur:     8px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color:    Theme.shadow;
+
+    HorizontalLayout {
+        padding-left: 16px; padding-right: 12px;
+        padding-top: 0px;   padding-bottom: 0px;
+        spacing: 12px;
+        alignment: center;
+
+        // ── Result icon ────────────────────────────────────────────────
+        // Decorative, independent of the winning side — SVG rather than a Unicode
+        // glyph (same missing-glyph issue as ♔/♚/✕, see CLAUDE_AI.md).
+        Image {
+            source: @image-url("../assets/pieces/bQ.svg");
+            width: 24px; height: 24px;
+            image-fit: contain;
+        }
+
+        // ── Result + reason text ──────────────────────────────────────
+        VerticalLayout {
+            alignment: center; spacing: 2px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.result-text;
+                color: Theme.text; font-size: 14px; font-weight: 700;
+            }
+            Text {
+                text: root.reason-text;
+                color: Theme.overlay0; font-size: 11px;
+            }
+        }
+
+        // ── New Game button ────────────────────────────────────────
+        Rectangle {
+            height: 34px; width: 150px;
+            border-radius: 6px;
+            background: ta-ng.has-hover ? Theme.blue : Theme.blue.with-alpha(0.78);
+            animate background { duration: 120ms; }
+            drop-shadow-blur:     ta-ng.has-hover ? 8px : 3px;
+            drop-shadow-offset-y: ta-ng.has-hover ? 3px : 1px;
+            drop-shadow-color: Theme.shadow;
+
+            Text {
+                width: parent.width; height: parent.height;
+                text: Tr.menu-file-new-game;
+                color: #ffffff; font-size: 12px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            ta-ng := TouchArea {
+                enabled: root.active;
+                clicked => { root.new-game(); }
+            }
+        }
+    }
+}
+
+/// Non-blocking "Create a variation" / "End the variation" banner
+/// (PHASE 26, Step 3).
+///
+/// Replaces the old implicit mechanism (H vs H pause): shown as soon as
+/// the user views a past move in the history (`viewed-ply >= 0`),
+/// whether the variation is already being edited or not — two
+/// distinct states shared by this same component:
+/// - `editing == false`: "You are viewing a past move" + "Create a
+///   variation" button → calls `enter-variation-editing()`.
+/// - `editing == true`  : "Variation mode — editing in progress" + "End
+///   the variation" button → calls `exit-variation-editing()`. Stays
+///   shown until this button is clicked, including after several
+///   moves played within the variation (`viewed-ply` can fall back to -1 in
+///   between without this banner closing, fix for the original bug).
+component VariationEditBanner inherits Rectangle {
+    in property <bool> editing: false;
+    callback enter-variation();
+    callback exit-variation();
+
+    height: 44px;
+    background: Theme.surface0.with-alpha(0.96);
+    border-radius: 8px;
+    drop-shadow-blur:     8px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color:    Theme.shadow;
+
+    HorizontalLayout {
+        padding-left: 16px; padding-right: 12px;
+        spacing: 12px;
+        alignment: center;
+
+        Text {
+            // PHASE 26, Step 4: translated texts (Tr.variation-banner-*),
+            // replaces the hardcoded French from Step 3.
+            text: root.editing ? Tr.variation-banner-editing : Tr.variation-banner-viewing;
+            color: Theme.text; font-size: 12px; font-weight: 600;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Rectangle {
+            height: 30px; width: 160px;
+            border-radius: 6px;
+            background: ta-var.has-hover ? Theme.blue : Theme.blue.with-alpha(0.78);
+            animate background { duration: 120ms; }
+
+            Text {
+                width: parent.width; height: parent.height;
+                text: root.editing ? Tr.btn-variation-exit : Tr.btn-variation-create;
+                color: #ffffff; font-size: 12px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            ta-var := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    if root.editing {
+                        root.exit-variation();
+                    } else {
+                        root.enter-variation();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Puzzle mode control bar (PHASE 14, Step 6).
+///
+/// Combines into a single non-blocking bar: the objective banner ("Your
+/// move, White!" or the revealed theme/rating) and the three actions
+/// always available while solving. Replaces the standard `GameOverBanner`
+/// in Puzzle mode (explicitly hidden in this mode, see further
+/// below) — a checkmate reached while solving a puzzle should not offer
+/// "New game" but "Next puzzle".
+component PuzzleControlBar inherits Rectangle {
+    in property <string> title-text;
+    in property <string> subtitle-text;
+    /// `true` = puzzle solved (green accent); `false` = in progress or failed
+    /// (neutral/orange accent depending on `failed`).
+    in property <bool>   solved: false;
+    /// `true` = attempt ended without success (revealed or abandoned) —
+    /// visual accent distinct from "in progress".
+    in property <bool>   failed: false;
+    /// Hides the "Show solution" button once the sequence has ended
+    /// (solved, revealed, or corrupted sequence).
+    in property <bool>   show-reveal: true;
+    callback show-solution();
+    callback next-puzzle();
+    callback quit();
+
+    height: 54px;
+    background: Theme.surface0.with-alpha(0.96);
+    border-radius: 8px;
+    border-width: 1.5px;
+    border-color: root.solved ? Theme.green.with-alpha(0.55)
+                : root.failed ? Theme.peach.with-alpha(0.55)
+                : Theme.blue.with-alpha(0.35);
+    animate border-color { duration: 200ms; }
+    drop-shadow-blur:     8px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color:    Theme.shadow;
+
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 10px;
+        spacing: 10px;
+        alignment: center;
+
+        // ── Result icon (PHASE 14, Step 7) ──────────────────────────
+        // Vector-based (Path), no Unicode ✓/✕ glyph — same font
+        // portability constraint documented in CLAUDE_AI.md. Visible
+        // only once the attempt has ended (solved or not);
+        // absent while solving (neither `solved` nor `failed`).
+        if root.solved || root.failed: Rectangle {
+            width: 28px; height: 28px; border-radius: 14px;
+            background: (root.solved ? Theme.green : Theme.peach).with-alpha(0.15);
+            if root.solved: Path {
+                x: 6px; y: 8px; width: 16px; height: 12px;
+                viewbox-width: 16; viewbox-height: 12;
+                fill: Colors.transparent;
+                stroke: Theme.green;
+                stroke-width: 2px;
+                commands: "M 1 6 L 6 11 L 15 1";
+            }
+            if root.failed: Path {
+                x: 7px; y: 7px; width: 14px; height: 14px;
+                viewbox-width: 14; viewbox-height: 14;
+                fill: Colors.transparent;
+                stroke: Theme.peach;
+                stroke-width: 2px;
+                commands: "M 1 1 L 13 13 M 13 1 L 1 13";
+            }
+        }
+
+        VerticalLayout {
+            alignment: center; spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title-text;
+                color: Theme.text; font-size: 13px; font-weight: 700;
+                overflow: elide;
+            }
+            if root.subtitle-text != "": Text {
+                text: root.subtitle-text;
+                color: Theme.overlay0; font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        if root.show-reveal: Rectangle {
+            width: 118px; height: 34px;
+            border-radius: 6px;
+            background: ta-reveal.has-hover ? Theme.surface1 : Theme.surface0;
+            border-width: 1px; border-color: Theme.overlay0;
+            Text {
+                width: parent.width; height: parent.height;
+                text: Tr.app-puzzle-show-solution;
+                color: Theme.text; font-size: 10px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            ta-reveal := TouchArea { mouse-cursor: pointer; clicked => { root.show-solution(); } }
+        }
+
+        Rectangle {
+            width: 108px; height: 34px;
+            border-radius: 6px;
+            background: ta-next.has-hover ? Theme.blue : Theme.blue.with-alpha(0.78);
+            animate background { duration: 120ms; }
+            Text {
+                width: parent.width; height: parent.height;
+                text: Tr.app-puzzle-next;
+                color: #ffffff; font-size: 10px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            ta-next := TouchArea { mouse-cursor: pointer; clicked => { root.next-puzzle(); } }
+        }
+
+        Rectangle {
+            width: 96px; height: 34px;
+            border-radius: 6px;
+            background: ta-quit.has-hover ? Theme.surface1 : Theme.surface0;
+            border-width: 1px; border-color: Theme.overlay0;
+            Text {
+                width: parent.width; height: parent.height;
+                text: Tr.menu-file-quit;
+                color: Theme.subtext0; font-size: 10px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            ta-quit := TouchArea { mouse-cursor: pointer; clicked => { root.quit(); } }
+        }
+    }
+}
+
+/// Temporary "book move played" notification (PHASE 15, Step 6bis).
+///
+/// Fades in, then automatically disappears after ~2.2s. Rust
+/// increments `notif-seq` on every trigger (same text or not) —
+/// `changed` only re-fires on an actual value change, a simple
+/// boolean wouldn't be enough to replay the animation for two identical
+/// consecutive moves (e.g. two different books playing "Nf3" in different games).
+component BookToast inherits Rectangle {
+    in property <string> notif-text;
+    in property <int>    notif-seq;
+
+    property <bool> shown: false;
+
+    changed notif-seq => {
+        root.shown = true;
+        hide-timer.running = true;
+    }
+
+    width: 230px;
+    height: 32px;
+    border-radius: 8px;
+    background: Theme.crust.with-alpha(0.94);
+    border-width: 1px;
+    border-color: Theme.peach.with-alpha(0.5);
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Theme.shadow;
+
+    opacity: shown ? 1.0 : 0.0;
+    animate opacity { duration: 220ms; easing: ease-in-out; }
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: root.notif-text;
+        color: Theme.text; font-size: 12px; font-weight: 600;
+        horizontal-alignment: center; vertical-alignment: center;
+        overflow: elide;
+    }
+
+    hide-timer := Timer {
+        interval: 2200ms;
+        running: false;
+        triggered => {
+            root.shown = false;
+            self.running = false;
+        }
+    }
+}
+
+/// Temporary "correct / incorrect move" notification in Puzzle mode
+/// (PHASE 14, Step 6). Mechanism identical to `BookToast` (text + counter
+/// incremented by Rust on every attempt, to replay the animation even on
+/// two consecutive failures) — color accent based on `positive`.
+component PuzzleToast inherits Rectangle {
+    in property <string> notif-text;
+    in property <int>    notif-seq;
+    in property <bool>   positive: true;
+
+    property <bool> shown: false;
+
+    changed notif-seq => {
+        root.shown = true;
+        hide-timer.running = true;
+    }
+
+    width: 210px;
+    height: 32px;
+    border-radius: 8px;
+    background: Theme.crust.with-alpha(0.94);
+    border-width: 1px;
+    border-color: (root.positive ? Theme.green : Theme.red).with-alpha(0.55);
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Theme.shadow;
+
+    opacity: shown ? 1.0 : 0.0;
+    animate opacity { duration: 220ms; easing: ease-in-out; }
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: root.notif-text;
+        color: root.positive ? Theme.green : Theme.red;
+        font-size: 12px; font-weight: 700;
+        horizontal-alignment: center; vertical-alignment: center;
+        overflow: elide;
+    }
+
+    hide-timer := Timer {
+        interval: 1100ms;
+        running: false;
+        triggered => {
+            root.shown = false;
+            self.running = false;
+        }
+    }
+}
+
+/// Digital countdown clock for a chess timer.
+///
+/// Dynamic colors:
+///   - normal   → Theme.text
+///   - ≤ 30 s   → Theme.peach (orange)
+///   - ≤ 10 s   → Theme.red   (red)
+///
+/// Slightly blue background when it's this player's turn (`clock-active`).
+component ClockDisplay inherits Rectangle {
+    /// Formatted text supplied by Rust ("MM:SS" or "H:MM:SS").
+    in property <string> clock-text:   "--:--";
+    /// Remaining milliseconds — used only for the color thresholds.
+    in property <int>    clock-ms:     0;
+    /// `true` when it's this player's turn (their clock is running).
+    in property <bool>   clock-active: false;
+    /// Toggled by Rust every 500 ms when the active clock is ≤ 10 s.
+    in property <bool>   blink-tick:   false;
+
+    width: 88px;
+
+    // Blinking: opacity reduced to 0.18 on the "off" phase when critical + active
+    opacity: (clock-ms > 0 && clock-ms <= 10000 && clock-active && blink-tick) ? 0.18 : 1.0;
+    animate opacity { duration: 150ms; }
+
+    background: clock-active ? Theme.blue.with-alpha(0.12) : transparent;
+    border-radius: 6px;
+    animate background { duration: 200ms; }
+
+    Text {
+        width:  parent.width;
+        height: parent.height;
+        text:   clock-text;
+        font-size:   19px;
+        font-weight: 700;
+        // Thresholds: > 0 avoids red on the initial "not started" state
+        color: (clock-ms > 0 && clock-ms <= 10000) ? Theme.red
+             : (clock-ms > 0 && clock-ms <= 30000) ? Theme.peach
+             :                                        Theme.text;
+        animate color { duration: 300ms; }
+        horizontal-alignment: center;
+        vertical-alignment:   center;
+    }
+}
+
+// ── Main window ────────────────────────────────────────────────────────
+export component AppWindow inherits Window {
+    title: Tr.app-name;
+    background: Theme.base;
+
+    /// Official software version number (e.g. "1.0.0"), read by Rust
+    /// from `Cargo.toml` via `env!("CARGO_PKG_VERSION")` and passed
+    /// once at startup — never hardcoded on the Slint side (see "About"
+    /// window, title section).
+    in-out property <string> app-version-number: "";
+
+    // ── Splitter bar ───────────────────────────────────────────────
+    /// Absolute position of the splitter bar's center (draggable).
+    /// Controls the relative width of the board and the side panel.
+    private property <length> splitter-pos: 720px;
+
+    // ── Game state properties ──────────────────────────────────────────
+    in-out property <string>       status-text:       Tr.board-turn-white;
+    in-out property <string>       white-player-name: Tr.board-white;
+    in-out property <string>       black-player-name: Tr.board-black;
+    in-out property <bool>         is-white-turn:     true;
+    in-out property <[SquareData]> squares;
+    in-out property <[MoveRow]>    moves;
+    in-out property <int>          viewed-ply: -1;
+    /// Explicit variation-editing mode (PHASE 26, Step 1/3) — active
+    /// between a click on "Create a variation" and a click on "End the
+    /// variation". Unlike `viewed-ply`, stays true after several
+    /// moves played within the variation (see `GameController::is_variation_editing`).
+    in-out property <bool>         variation-editing: false;
+
+    // ── Captured pieces (Phase 19) ───────────────────────────────────────
+    // Trophies for each side (captured enemy pieces), sorted and
+    // compacted on the Rust side. `material-diff`: positive = White advantage.
+    in-out property <[CapturedPieceData]> captured-by-white: [];
+    in-out property <[CapturedPieceData]> captured-by-black: [];
+    in-out property <int>                 material-diff:     0;
+
+    // ── Engine analysis properties ───────────────────────────────────────
+    in-out property <string>     engine-depth:    "—";
+    in-out property <string>     engine-score:    "—";
+    in-out property <string>     engine-pv:       "—";   // line 1 — Rust backward compat
+    in-out property <bool>       engine-thinking: false;
+    /// Number of Multi-PV lines for White (0 = disabled, 1/2/3/5).
+    in-out property <int>        analysis-multipv-white: 0;
+    /// Number of Multi-PV lines for Black (0 = disabled, 1/2/3/5).
+    in-out property <int>        analysis-multipv-black: 0;
+    /// White's PV lines (bottom panel).
+    in-out property <[PvLine]>   engine-pv-lines-white: [];
+    /// Black's PV lines (top panel).
+    in-out property <[PvLine]>   engine-pv-lines-black: [];
+    /// Short name of the active analysis/hint engine (e.g. "Stockfish 17").
+    in-out property <string> analysis-engine-name: "";
+    /// Triggered when the user changes the number of White MultiPV lines.
+    callback multipv-white-changed(int);
+    /// Triggered when the user changes the number of Black MultiPV lines.
+    callback multipv-black-changed(int);
+    /// Triggered when the user clicks a White PV line.
+    callback pv-line-white-clicked(int);
+    /// Triggered when the user clicks a Black PV line.
+    callback pv-line-black-clicked(int);
+    /// Selected rank in the White panel (0 = none).
+    in-out property <int> pv-selected-rank-white: 0;
+    /// Selected rank in the Black panel (0 = none).
+    in-out property <int> pv-selected-rank-black: 0;
+    /// Score history (one ScoreBar per analyzed move, White's perspective).
+    in-out property <[ScoreBar]> score-history:   [];
+    /// SVG path commands for the White-advantage curve (viewbox 1000×100).
+    in-out property <string>     white-curve-path: "";
+    /// SVG path commands for the Black-advantage curve (viewbox 1000×100).
+    in-out property <string>     black-curve-path: "";
+
+    // ── End-of-game properties ──────────────────────────────────────────
+    /// `true` when the game is over (triggers the banner).
+    in-out property <bool>   is-game-over:      false;
+    /// Main banner text ("White wins" / "Draw" …).
+    in-out property <string> game-over-result:  "";
+    /// Banner subtitle ("Checkmate" / "Stalemate" / "Draw").
+    in-out property <string> game-over-reason:  "";
+
+    // ── Promotion properties ──────────────────────────────────────────────
+    /// `true` when a pawn is awaiting selection of the promotion piece.
+    in-out property <bool>   show-promotion-modal:  false;
+    /// Color of the promoting pawn (to display the correct symbols).
+    in-out property <bool>   promotion-is-white:    true;
+
+    // ── Right-click context menu on a move (PHASE 16, Step 6.1) ─────────────────
+    /// ID of the node targeted by the active context menu, `-1` = no
+    /// menu shown.
+    in-out property <int>    context-menu-node-id: -1;
+    /// Label of the targeted move, shown at the top of the menu (e.g. "Nf3!").
+    in-out property <string> context-menu-move-label: "";
+    /// `true` if the targeted move belongs to a variation (PHASE 16, Step
+    /// 6.2) — see `NagContextMenu.is-variation` and `move_list.slint`.
+    in-out property <bool>   context-menu-is-variation: false;
+    /// NAG annotation chosen in the context menu (code 1 to 6) for the
+    /// `context-menu-node-id` move — Rust reads this last property
+    /// when processing the callback rather than receiving it as a parameter.
+    callback context-menu-nag-picked(int);
+    /// "Promote to main line" chosen in the context menu
+    /// (PHASE 16, Step 6.2) for the `context-menu-node-id` move.
+    callback context-menu-promote-picked();
+    /// "Delete this variation" chosen in the context menu (PHASE 16,
+    /// Step 6.2) for the `context-menu-node-id` move.
+    callback context-menu-delete-picked();
+    /// ID of the node whose comment is being edited
+    /// inline (PHASE 16, Step 6.3), `-1` = no editing in progress. Limited
+    /// to the main line for this step (decision made on
+    /// 04/07/2026) — never set from a variation block.
+    in-out property <int> editing-comment-node-id: -1;
+    /// Comment confirmed for the `editing-comment-node-id` move (final
+    /// text entered, empty string = clear the existing comment).
+    callback move-comment-saved(int, string);
+
+    // ── Wizard / recap properties ────────────────────────────────
+    /// Shows the game setup wizard.
+    in-out property <bool>   show-setup-wizard: false;
+    /// Shows the "Replay?" recap screen.
+    in-out property <bool>   show-setup-recap:  false;
+    /// Shows the language selection screen (first launch).
+    in-out property <bool>   show-language-setup: false;
+    /// Shows the Preferences panel.
+    in-out property <bool>   show-preferences:    false;
+    /// Shows the "About" window.
+    in-out property <bool>   show-about:          false;
+    /// Shows the close-confirmation modal (click on the native close button).
+    in-out property <bool>   show-close-confirm:  false;
+    /// Game paused (only in timed games with a human).
+    in-out property <bool>   game-paused:         false;
+    /// Active node in the Preferences panel (0=Language 1=Engines 2=Appearance).
+    /// Allows opening directly on a node from the wizard.
+    in-out property <int>    pref-active-node:    0;
+    /// Index of the active language in the `Lang::all()` order on the Rust side (0 =
+    /// fr, …, 33 = he) — drives the language dropdown in Preferences
+    /// (ergonomics bugfix from 03/07/2026, see `Lang::ui_index()`).
+    in-out property <int>    current-lang-index:  0;
+    /// Info lines shown in the recap (filled in by Rust).
+    in-out property <string> recap-line1: "";
+    in-out property <string> recap-line2: "";
+    in-out property <string> recap-line3: "";
+    /// Pre-filled engine paths (updated by Rust when the wizard launches).
+    in-out property <string> wizard-engine-path-w: "";
+    in-out property <string> wizard-engine-path-b: "";
+    /// Name of the PGN file selected in the wizard ("" = starting position).
+    /// Rust updates this property after the native file dialog.
+    in-out property <string> wizard-pgn-filename:  "";
+    /// FEN of the position set via the editor OR chosen from the reference game
+    /// database in the wizard ("" = not used). Mutually exclusive with
+    /// wizard-pgn-filename. Rust reads this value in on_setup_game.
+    in-out property <string> wizard-start-fen:     "";
+    /// `true` if `wizard-start-fen` was set by the 3rd "From the
+    /// game database" button (ergonomics bugfix 09/07/2026), `false` if it comes from
+    /// the position editor — distinguishes which button in step 1 to show as
+    /// active (see `game_setup.slint`).
+    in-out property <bool>   wizard-start-fen-from-base: false;
+    /// Current wizard step (0 = mode, 1 = config). Persisted here to survive
+    /// destruction/recreation of the component (if root.show-setup-wizard).
+    in-out property <int>    wizard-step:          0;
+    /// Remembered Puzzle mode choices (PHASE 14, Step 5) — pre-filled by Rust
+    /// from prefs when the wizard opens.
+    in-out property <bool>   puzzle-hint-theme:    false;
+    in-out property <bool>   puzzle-hint-button:   true;
+
+    /// Debug mode (PHASE 26sexies, Preferences → Misc) — JSON logging
+    /// active/inactive. Loaded from prefs at startup, toggleable
+    /// live via the checkbox (see `toggle-debug-mode`).
+    in-out property <bool>   debug-mode-enabled:   false;
+
+    // ── In-game Puzzle mode properties (PHASE 14, Step 6) ────────────────
+    /// `true` while a puzzle session is loaded (mode 4 active) —
+    /// shows `PuzzleControlBar` and hides the standard `GameOverBanner`.
+    in-out property <bool>   puzzle-mode-active:   false;
+    /// Banner title: neutral phrase ("Your move, White!"),
+    /// revealed theme, or result message depending on the stage.
+    in-out property <string> puzzle-title:         "";
+    /// Subtitle (theme + rating once revealed) — "" if not yet shown.
+    in-out property <string> puzzle-subtitle:      "";
+    /// `true` = puzzle solved (green banner accent).
+    in-out property <bool>   puzzle-solved:        false;
+    /// `true` = attempt ended without success (revealed / abandoned).
+    in-out property <bool>   puzzle-failed:        false;
+    /// `true` while the sequence hasn't ended — hides "Show
+    /// solution" once solved/revealed.
+    in-out property <bool>   puzzle-show-reveal:   true;
+    /// "Correct" / "Incorrect" notification after every attempt (Step 6).
+    /// Reuses the `BookToast` mechanism (text + incremented counter).
+    in-out property <string> puzzle-feedback-text: "";
+    in-out property <int>    puzzle-feedback-seq:  0;
+    in-out property <bool>   puzzle-feedback-positive: true;
+    callback puzzle-show-solution();
+    callback puzzle-next();
+    callback puzzle-quit();
+    /// List of saved UCI engines (from prefs), passed to the wizard and the Preferences panel.
+    in-out property <[SavedEngine]> saved-engines: [];
+    /// UCI options of the engine selected in Preferences (filled in by Rust after query).
+    in-out property <[UciOptionItem]> engine-options: [];
+    /// Index of the selected engine in the Preferences panel (-1 = none).
+    in-out property <int> selected-engine-idx: -1;
+
+    // ── Engine-player properties ──────────────────────────────────────────────
+    /// `true` when an engine-player is computing its move.
+    /// Triggers the "Engine thinking…" indicator in the status bar.
+    in-out property <bool> engine-playing: false;
+
+    // ── Clock properties ────────────────────────────────────────────────────
+    /// Shows the timers (false if TimeControl is Infinite / MoveTime / Level).
+    in-out property <bool>   show-clocks:        false;
+    /// White's remaining time, formatted by Rust ("MM:SS" or "H:MM:SS").
+    in-out property <string> white-clock-text:   "--:--";
+    /// Black's remaining time, formatted by Rust.
+    in-out property <string> black-clock-text:   "--:--";
+    /// White's remaining milliseconds (for color thresholds in ClockDisplay).
+    in-out property <int>    white-clock-ms:     0;
+    /// Black's remaining milliseconds.
+    in-out property <int>    black-clock-ms:     0;
+    /// `true` when it's White's turn (their clock is running).
+    in-out property <bool>   white-clock-active: false;
+    /// `true` when it's Black's turn.
+    in-out property <bool>   black-clock-active: false;
+    /// Toggled by Rust every 500 ms when an active clock is ≤ 10 s.
+    in-out property <bool>   blink-tick:         false;
+    /// `true` = board flipped (view from Black's side).
+    in-out property <bool>   board-flipped:      false;
+    /// PHASE 68: `true` = Assist mode active — when a piece is
+    /// selected, target squares additionally show badges (capture risk "!",
+    /// check "+", checkmate "#"). Hidden/inactive in Puzzle
+    /// mode (see the button in the icon bar below).
+    in-out property <bool>   assist-mode-active: false;
+
+    // ── Tournament properties ────────────────────────────────────────────────────
+    /// Shows the tournament setup wizard.
+    in-out property <bool> show-tournament-setup: false;
+    /// `true` when an engine tournament is running (or has just finished).
+    /// Shows TournamentPanel instead of the standard side panel.
+    in-out property <bool> is-tournament-mode: false;
+    /// `true` when all tournament games have been played.
+    in-out property <bool> tournament-finished: false;
+    /// Current standings (updated after every game).
+    in-out property <[TournamentStanding]> tournament-standings: [];
+    /// Name of the engine playing White in the current game.
+    in-out property <string> tournament-current-white: "";
+    /// Name of the engine playing Black in the current game.
+    in-out property <string> tournament-current-black: "";
+    /// Number of games already played.
+    in-out property <int>   tournament-games-played:  0;
+    /// Total number of games in the tournament.
+    in-out property <int>   tournament-total-games:   0;
+    /// Ratio [0.0, 1.0] for the progress bar.
+    in-out property <float> tournament-progress:      0.0;
+
+    // ── Hint engine properties ─────────────────────────────────────────
+    /// Mode of the current game: 0 = H vs H  |  1 = H vs M  |  2 = M vs M.
+    /// The hint button is hidden in M vs M mode.
+    in-out property <int>    current-game-mode:  0;
+    /// Path of the hint engine selected in Preferences ("" = none).
+    in-out property <string> hint-engine-path:   "";
+    /// Display name of the hint engine ("" = none) — PHASE 52, resolved on the
+    /// Rust side (`hint_engine_display_name`), same principle as `book-name-white`/
+    /// `book-name-black` below. Feeds the dropdown menu in the
+    /// Preferences → Engines panel (`HintEngineDropdown`, preferences.slint).
+    in-out property <string> hint-engine-name:   "";
+    /// `true` when the hint engine is computing.
+    in-out property <bool>   hint-computing:     false;
+    /// SVG commands for the hint arrow (viewbox 0 0 8 8). Empty = no arrow.
+    in-out property <string> hint-arrow-path:    "";
+
+    // ── Polyglot opening books (PHASE 15) ───────────────────────────
+    /// File name of the loaded books ("" = none). Full path handled on the Rust side.
+    in-out property <string> book-name-white:    "";
+    in-out property <string> book-name-black:    "";
+    /// Temporary "book move played" notification (PHASE 15, Step 6bis).
+    /// `book-notification-seq` is incremented by Rust on every trigger
+    /// (same text or not) to guarantee the toast re-fires — see
+    /// `BookToast` below, which listens to its `changed`.
+    in-out property <string> book-notification-text: "";
+    in-out property <int>    book-notification-seq:  0;
+
+    // ── Tactical puzzles (PHASE 14) ──────────────────────────────────────
+    /// Number of puzzles in the database ("0" = none imported). No database is
+    /// shipped with the software — the user supplies their own CSV file.
+    in-out property <int> puzzle-count: 0;
+    /// Overall solving statistics (PHASE 14, Step 8), already
+    /// formatted on the Rust side — shown only in Preferences.
+    in-out property <string> puzzle-stats-text: "";
+    callback import-puzzles();
+    /// True while a puzzle file import is running in the background
+    /// (PHASE 14, bugfix from 03/07/2026: a 300 MB file can take
+    /// long enough to look like a crash). Disables the
+    /// "Import..."/"Unload" buttons and shows `puzzle-import-status`.
+    in-out property <bool>   puzzle-import-active: false;
+    /// Status text shown during the import (e.g. "12,000 line(s)
+    /// processed…"), formatted on the Rust side.
+    in-out property <string> puzzle-import-status: "";
+    /// Clears the puzzle database (puzzles + progress statistics) without
+    /// going through a full reset of preferences.
+    callback unload-puzzles();
+
+    // ── Reference game databases (PHASE 82, then follow-up 11/07/2026) ───
+    // Decision agreed on in discussion (11/07/2026): PGN and SCID live in
+    // TWO fully independent `SQLite` files (see
+    // `app_paths::reference_pgn_db_path`/`reference_scid_db_path`) —
+    // importing/clearing one never touches the other. The browser chooses
+    // which one to query via `reference-browser-source` (see below).
+    /// Number of games in the PGN reference database ("0" = none
+    /// imported). No database is shipped with the software — the user
+    /// supplies their own PGN file (e.g. Lumbra's Gigabase).
+    in-out property <int> reference-pgn-game-count: 0;
+    /// Number of games in the SCID reference database (`.si4`/`.si5`,
+    /// see `crates/scid`) — "0" = none imported.
+    in-out property <int> reference-scid-game-count: 0;
+    /// True while an import (PGN OR SCID) is running in the background — same
+    /// principle as `puzzle-import-active`. Disables BOTH
+    /// "Import.../Unload" pairs (PGN and SCID): only one import at a
+    /// time, a deliberate restriction to keep things simple (see the
+    /// 11/07/2026 discussion) even though the two databases are now
+    /// distinct files that could in theory be imported in parallel.
+    in-out property <bool>   reference-import-active: false;
+    /// Status text shown during the import (e.g. "12,000 game(s)
+    /// processed…"), formatted on the Rust side.
+    in-out property <string> reference-import-status: "";
+    /// Ratio [0.0, 1.0] for the import progress bar (perf
+    /// bugfix 09/07/2026, user request: since the total number of games is
+    /// known from the first progress call, a real visual bar
+    /// is possible rather than just text) — same principle as
+    /// `tournament-progress`.
+    in-out property <float> reference-import-progress: 0.0;
+    /// (Re)imports a PGN file into the PGN reference database — a new
+    /// import entirely replaces this database (decision made, no
+    /// incremental import). Never affects the SCID database.
+    callback import-reference-base();
+    /// (Re)imports a SCID database (`.si4`/`.sn4`/`.sg4`) into the
+    /// SCID reference database — follow-up 11/07/2026. Same full-replacement
+    /// policy as `import-reference-base`, in its own file:
+    /// never affects the PGN database. Both imports share the same
+    /// state trio (`reference-import-active`/`-status`/`-progress`): they
+    /// can't run at the same time (see above).
+    callback import-reference-si4-base();
+    /// Clears the PGN reference database (bugfix 09/07/2026, user feedback:
+    /// its absence was noticed) — same principle as `unload-puzzles`. Never
+    /// affects the SCID database.
+    callback clear-reference-base();
+    /// Symmetric counterpart of `clear-reference-base` for the SCID database
+    /// (follow-up 11/07/2026).
+    callback clear-reference-si4-base();
+
+    // ── Game database browser screen (PHASE 82, step 7) ────
+    /// Shows the browser screen (`ReferenceBrowser`), opened from the
+    /// "Navigation Base" card in the wizard (see `open-navigation-base`
+    /// below, in the `GameSetupWizard` instantiation).
+    in-out property <bool> show-reference-browser: false;
+    /// `true` if `ReferenceBrowser` was opened from the wizard's 3rd "From
+    /// the game database" button (step 1, ergonomics bugfix
+    /// 09/07/2026, see `open-reference-browser-wizard` below), rather
+    /// than from the "Navigation Base" card (step 0, which closes
+    /// the wizard). Passed as-is to `GameDetailView.from-wizard-picker`
+    /// (ergonomics bugfix 09/07/2026, follow-up): gates the display of the
+    /// "Start from this position" button — never visible from a
+    /// pure browsing access ("Navigation Base"), where clicking a move ONLY
+    /// updates the preview (`game-detail-ply-selected`), never
+    /// starts a game (explicit user feedback: source of
+    /// confusion).
+    in-out property <bool> reference-browser-from-wizard: false;
+    /// Source queried by the browser (follow-up 11/07/2026): `0` = PGN
+    /// database, `1` = SCID database. Driven by the selector at the top of
+    /// `ReferenceBrowser`; read on the Rust side (`current_reference_db_path`) on
+    /// every query (search, opening tree, game detail...) —
+    /// a single property governs BOTH tabs at once (decision
+    /// made: no different source between the list and the tree).
+    in-out property <int> reference-browser-source: 0;
+    /// Results of the current search, filled in by Rust after every
+    /// call to `search-reference-games` (see below) — one page at a
+    /// time (`LIMIT` on the SQL side, see `reference_game_repo.rs`).
+    in-out property <[ReferenceGameListRow]> reference-browser-games: [];
+    /// Total number of games matching the current filters (across all
+    /// pages) — used to compute "Page X / Y" on the
+    /// `ReferenceBrowser` side.
+    in-out property <int> reference-browser-total-count: 0;
+    /// Current page (0-based). Reset to 0 by `open-navigation-base` and by
+    /// the "Reset" button in `ReferenceBrowser` (new search).
+    in-out property <int> reference-browser-page: 0;
+    /// Active tab of `ReferenceBrowser` (0 = Games, 1 = opening
+    /// tree). Ergonomics follow-up 10/07/2026: forced to 0 by Rust when
+    /// the user clicks "List games" in the tree, to immediately
+    /// bring up the filtered list rather than leaving the user to guess
+    /// where to check the result.
+    in-out property <int> reference-browser-active-tab: 0;
+    // Filters (draft that persists while the screen stays open — explicitly
+    // cleared on every (re)opening from the wizard, see
+    // `open-navigation-base`).
+    in-out property <string> reference-browser-filter-player:    "";
+    in-out property <string> reference-browser-filter-elo-min:   "";
+    in-out property <string> reference-browser-filter-elo-max:   "";
+    in-out property <string> reference-browser-filter-date-from: "";
+    in-out property <string> reference-browser-filter-date-to:   "";
+    in-out property <string> reference-browser-filter-eco:       "";
+    /// Rust re-reads all the `reference-browser-filter-*` fields above
+    /// as well as `reference-browser-page`, runs the corresponding
+    /// `SQL` search (see `main.rs`), then fills in `reference-browser-games`
+    /// and `reference-browser-total-count`. Synchronous query (see the
+    /// comment in `reference_browser.slint`: pagination + indexed columns,
+    /// on the order of a millisecond even on a large database).
+    callback search-reference-games();
+
+    // ── Opening tree (PHASE 82, step 8) ────────────────────────────────
+    // Move path handled entirely on the Rust side (`Rc<RefCell<Vec<String>>>`,
+    // see `main.rs`) — never exposed as-is to Slint, which only receives an
+    // already-formatted breadcrumb (`tree-path-display`) and simply
+    // notifies clicks via the callbacks below.
+    in-out property <string> tree-path-display: "";
+    in-out property <[OpeningMoveRow]> tree-candidates: [];
+    in-out property <int> tree-total-games: 0;
+    in-out property <string> tree-elo-min: "";
+    in-out property <bool> tree-can-go-back: false;
+    // Ergonomics follow-up 10/07/2026 — preview board (user
+    // feedback: the candidate-moves table wasted the space
+    // freed up by columns too wide for their content; the space
+    // reclaimed now shows the reached position). No callback
+    // attached: purely read-only, updated by `refresh_opening_tree`
+    // at the same time as `tree-candidates`. The hover arrow for a
+    // candidate move (`arrow-path` on each `OpeningMoveRow`) is handled
+    // entirely on the Slint side (local reactive state in `OpeningTreeTab`), with no
+    // additional Rust callback.
+    in-out property <[SquareData]> tree-board-squares: [];
+    in-out property <[CapturedPieceData]> tree-captured-by-white: [];
+    in-out property <[CapturedPieceData]> tree-captured-by-black: [];
+    in-out property <int> tree-material-diff: 0;
+    /// Adds this UCI move to the current path and queries the following moves
+    /// from the newly reached position.
+    callback tree-move-chosen(string);
+    /// Removes the last move from the path (goes back one ply) and queries.
+    callback tree-go-back();
+    /// Clears the path (back to the standard starting position) and queries.
+    callback tree-reset();
+    /// Re-reads `tree-elo-min`, queries again from the current position
+    /// (path unchanged).
+    callback tree-filter-changed();
+
+    // Ergonomics follow-up 10/07/2026 — opening tree → game list
+    // bridge (user feedback: the tree used to be a dead end,
+    // no way to view the games making up a statistic).
+    // The currently checked moves are Rust state (`Rc<RefCell<...>>`,
+    // see `main.rs`), never duplicated in an array on the Slint side: only the
+    // number of selected games and an "all checked" flag are
+    // exposed, consistent with the "nothing checked = everything selected" semantics.
+    in-out property <int> tree-selected-count: 0;
+    in-out property <bool> tree-all-checked: false;
+    /// Toggles the checked state of the given UCI move and recomputes
+    /// `tree-selected-count` (`games_for_path` query).
+    callback tree-toggle-move(string);
+    /// Checks or unchecks all candidate moves in the current list.
+    callback tree-toggle-all();
+    /// Applies the current selection (games from checked moves, or all
+    /// games of the position if nothing is checked) as the `game-ids`
+    /// filter of the "Games" tab, then switches to it
+    /// (`reference-browser-active-tab = 0`).
+    callback tree-list-games();
+
+    /// Indicator for the active "Opening tree" filter in the
+    /// "Games" tab — see `reference_browser.slint` (chip with a
+    /// remove button). Decision agreed on with the user: this filter
+    /// combines (logical AND) with the regular filters and only clears
+    /// via an explicit click on this chip, never implicitly.
+    in-out property <bool> tree-filter-active: false;
+    in-out property <string> tree-filter-label: "";
+    /// Clears the tree-derived `game-ids` filter and re-runs a search.
+    callback tree-filter-clear();
+
+    // ── Detail of a database game: on-demand evaluation curve
+    // (PHASE 82, step 9) ─────────────────────────────────────────────────
+    in-out property <bool>   show-game-detail: false;
+    /// ID of the displayed game (reference database) — re-read by
+    /// `analyze-game-detail` to retrieve the PGN without keeping it duplicated
+    /// on the Slint side.
+    in-out property <int>    game-detail-id: -1;
+    in-out property <string> game-detail-header: "";
+    in-out property <[GameDetailMoveRow]> game-detail-moves: [];
+    in-out property <[ScoreBar]> game-detail-scores: [];
+    in-out property <string> game-detail-white-curve: "";
+    in-out property <string> game-detail-black-curve: "";
+    in-out property <bool>   game-detail-analysis-active: false;
+    in-out property <string> game-detail-analysis-status: "";
+    /// True once the quick pass has finished — reveals the
+    /// "Deepen" button (decision made: quick analysis first, then
+    /// optional deepening, never the reverse).
+    in-out property <bool>   game-detail-can-deepen: false;
+    // ── Preview board + navigation (ergonomics bugfix 09/07/2026) ─────
+    /// STATIC board (see `game_controller::build_static_squares`) of the
+    /// position currently being previewed (`game-detail-current-ply`).
+    in-out property <[SquareData]> game-detail-board-squares: [];
+    /// Previewed ply (0 = starting position). Initialized to
+    /// `game-detail-total-plies` (end of game) by `open-game-detail`.
+    in-out property <int> game-detail-current-ply: 0;
+    /// Total number of plies in the displayed game.
+    in-out property <int> game-detail-total-plies: 0;
+    /// Opens the detail screen for game `id` (loads the header and the
+    /// move text; does NOT start analysis — that stays "on
+    /// demand", see `analyze-game-detail` below).
+    callback open-game-detail(int);
+    /// Runs an analysis of the entire `game-detail-id` game, one move after
+    /// another, with the `movetime_ms` thinking time given as argument
+    /// (short for the "Analyze" button, longer for "Deepen" — a
+    /// single callback for both, see `game_detail.slint`).
+    callback analyze-game-detail(int);
+    /// Requests recomputation of the preview for ply `ply` — NEVER
+    /// starts a game (ergonomics bugfix 09/07/2026, user feedback:
+    /// starting a game on a simple click in the list was a source of
+    /// confusion). See `main.rs::on_game_detail_ply_selected`.
+    callback game-detail-ply-selected(int);
+    /// Only wired/visible when the screen was opened from the wizard's 3rd
+    /// button ("From the game database", see
+    /// `reference-browser-from-wizard` and `game_setup.slint`): sends the
+    /// position of ply `ply` back to the already-open wizard (preserving the
+    /// already-chosen mode), without ever recreating it — see
+    /// `main.rs::on_game_detail_start_from_here`.
+    callback game-detail-start-from-here(int);
+    /// Ergonomics follow-up 10/07/2026 — 4 buttons "identical (same principle)" to
+    /// those of the main window, applied to the position currently
+    /// being previewed (`game-detail-current-ply`) rather than to the
+    /// current game. Copies the FEN of this position to the system clipboard.
+    callback game-detail-copy-fen();
+    /// Saves the PGN of the displayed reference game (text already
+    /// stored in the database, no reconstruction needed) to a file
+    /// (native rfd dialog).
+    callback game-detail-export-pgn();
+    /// Saves the board of the previewed position as a PNG image,
+    /// with the pieces captured up to that ply (native rfd dialog).
+    /// The argument carries the mini-board's current orientation
+    /// (`board-flipped`, a private property of `GameDetailView` — never
+    /// propagated up to `AppWindow` since it's purely visual, see
+    /// `game_detail.slint`).
+    callback game-detail-export-board-png(bool);
+
+    // ── Evaluation bar properties (Phase 11.3) ───────────────────────
+    /// Fraction [0.0, 1.0] for the vertical evaluation bar.
+    /// 0.0 = total Black advantage · 0.5 = equal · 1.0 = total White advantage.
+    /// Computed by Rust via sigmoid(score_pawns × 0.4).
+    in-out property <float> eval-fraction:    0.5;
+    /// `true` when the evaluation bar should be shown
+    /// (analysis engine active and score available).
+    in-out property <bool>  eval-bar-visible: false;
+
+    // ── Callbacks ─────────────────────────────────────────────────────────
+    callback square-clicked(int, int);
+    callback move-clicked(int);
+    /// Language chosen on the first-launch screen.
+    /// Rust: saves, applies, closes the screen, opens the wizard or recap.
+    callback language-chosen(string);
+    /// Language chosen in the Preferences panel.
+    /// Rust: saves and applies. The overlay closes via Slint.
+    callback pref-language-chosen(string);
+    /// Opens a file dialog (rfd) to add a UCI engine in preferences.
+    callback browse-add-engine();
+    /// Removes the engine at the given index from the persisted list.
+    callback remove-engine(int);
+    /// Triggered when the analysis of a move is done (score in pawns, White's perspective).
+    callback analysis-completed(float);
+    /// Triggered when the user chooses a promotion piece.
+    /// `piece`: 1=Queen  2=Rook  3=Bishop  4=Knight
+    callback promote-chosen(int);
+    /// Triggered when the user clicks "New game" (direct reset).
+    callback new-game();
+    /// Triggered when the user opens "New game" via the header/panel/banner button.
+    /// Rust decides: wizard (first time) or recap (existing config).
+    callback open-new-game();
+    /// Triggered when the user confirms wanting to quit the application.
+    callback quit-app();
+    /// Triggered when the user confirms the full reset.
+    /// Rust: deletes the prefs folder, clears the engine list, relaunches the wizard.
+    callback reset-prefs();
+    /// Triggered when the wizard confirms "Start".
+    /// Parameters: mode(0/1/2), hcolor(0/1/2), path-w, path-b, level-w, level-b,
+    ///              game-tc-idx, white-time-secs (0=preset), black-time-secs (0=preset)
+    callback setup-start(int, int, string, string, int, int, int, int, int);
+    /// Triggered when the wizard confirms "Start" in Puzzle mode (PHASE 14, Step 5).
+    /// Parameters: hint-theme, hint-button (see GameSetupWizard.launch-puzzle).
+    callback setup-start-puzzle(bool, bool);
+    /// Triggered when the user clicks "Replay" in the recap.
+    callback setup-replay();
+    /// Triggered by the engine-player thread when it has found its move (UCI notation).
+    /// Rust applies the move and possibly triggers the opposing engine.
+    callback engine-move-ready(string);
+    /// Triggered when the user selects an engine in Preferences.
+    /// Rust briefly connects to the engine, reads its UCI options, and updates engine-options.
+    callback query-engine-options(int);
+    /// UCI value changes — PHASE 56: Rust updates ONLY
+    /// engine-options (displayed model) until "Apply" has been
+    /// clicked — not engines.json.
+    callback inc-option(string);
+    callback dec-option(string);
+    callback set-option-value(string, string);  // (name, text value) — draft, not applied
+    callback toggle-option(string);
+    callback cycle-option(string, bool);        // (name, forward)
+    /// Applies all options of the selected engine at once (PHASE 56):
+    /// Rust parses/clamps each "spin" (falls back to default if not numeric),
+    /// then persists to engines.json.
+    callback validate-engine-options();
+    /// Resets each displayed option to its default value (PHASE 57,
+    /// draft: "Apply" must then be clicked to persist it).
+    callback reset-engine-options();
+    /// true if "Apply" detected at least one invalid "spin" value and reset it
+    /// to its default value (PHASE 57) — drives the warning
+    /// banner of `EngineOptionsDialog`.
+    in-out property <bool> invalid-options-detected: false;
+    /// Toggles debug mode (Preferences → Misc) — Rust persists the choice
+    /// and immediately enables/disables JSON logging.
+    callback toggle-debug-mode(bool);
+    /// Launches an engine tournament with the wizard's configuration.
+    /// kind        : "roundrobin" | "gauntlet"
+    /// gpp         : games per pair (1 or 2)
+    /// engine-mask : bitmask — bit i = engine i selected in saved-engines
+    /// movetime-ms : milliseconds per move
+    callback start-tournament(string, int, int, int);
+    /// Stops the running tournament (Rust resets bridge + state + flag).
+    callback stop-tournament();
+    /// Flips the board (White ↔ Black perspective).
+    /// Rust simply inverts `board-flipped`.
+    callback flip-board();
+    /// PHASE 68: toggles Assist mode (`assist-mode-active`) and
+    /// immediately recomputes the target-square badges if a piece is
+    /// already selected (Rust rebuilds `squares` right after).
+    callback toggle-assist-mode();
+    /// Requests a hint from the hint engine (spawns a UCI thread, computes for 800 ms).
+    /// Rust updates `hint-arrow-path` via invoke_from_event_loop.
+    callback request-hint();
+    /// Sets the hint engine in preferences.
+    /// idx = -1 → no engine.  Rust: saves to hint_engine.txt.
+    callback set-hint-engine(int);
+    /// Loads/validates a Polyglot book for White/Black (native rfd dialog
+    /// + `PolyglotBook::open` validation + error/confirmation message on the Rust side).
+    callback browse-book-white();
+    callback browse-book-black();
+    /// Clears the loaded book for White/Black.
+    callback clear-book-white();
+    callback clear-book-black();
+    /// Exports the current game to a PGN file (native rfd dialog).
+    callback export-pgn();
+    /// Imports a game from a PGN file (native rfd dialog).
+    callback import-pgn();
+    /// Prints the current game (board + move list) to a
+    /// PDF file (native rfd dialog) — PHASE 25. Always the game's
+    /// final position, regardless of the game type or the position
+    /// currently viewed on screen.
+    callback print-game();
+    /// Exports the displayed board (position + orientation + captured
+    /// pieces) as a PNG image (native rfd dialog) — PHASE 76. Unlike
+    /// `print-game`, respects navigation in the history (`viewed-ply`)
+    /// and the "Flip" button: a simple "snapshot" of what is currently
+    /// displayed on screen.
+    callback export-board-png();
+    /// Opens a PGN file dialog in the wizard (native rfd dialog).
+    /// Rust reads the file, stores its content, and updates `wizard-pgn-filename`.
+    callback wizard-pick-pgn();
+    /// Undoes the last move played (H vs H only).
+    /// Rust calls GameController::undo_last_move(), resets the analysis
+    /// and refreshes the display.
+    callback undo-move();
+    /// Copies the FEN of the current position to the system clipboard.
+    callback copy-fen();
+    /// Pastes the FEN from the clipboard and loads the position.
+    /// Rust validates the FEN before applying it; shows an error message if invalid.
+    callback paste-fen();
+    /// Toggles the game pause (clock stopped, moves blocked).
+    /// Rust stops/resumes the clock and the engine-player if needed.
+    callback toggle-pause();
+    /// PHASE 26, Step 3 — "Create a variation" / "End the
+    /// variation" banner shown above the board. `enter-variation-editing`
+    /// only has an effect if `viewed-ply >= 0` (see
+    /// `GameController::enter_variation_editing`); `exit-variation-editing`
+    /// is always safe to call.
+    callback enter-variation-editing();
+    callback exit-variation-editing();
+
+    // ── Position editor (Phase 12) ────────────────────────────────────
+    /// true = the visual FEN editor is shown (fullscreen overlay).
+    in-out property <bool>         show-position-editor:  false;
+    /// true = the editor was opened from the wizard (wizard mode).
+    /// In this mode, "Apply" returns the FEN to the wizard instead of starting a game.
+    in-out property <bool>         editor-from-wizard:    false;
+    /// The 64 squares as they are in the editor (updated by Rust).
+    in-out property <[SquareData]> editor-squares:        [];
+    /// ID of the active piece in the palette ("wK".."bP", "eraser", "").
+    /// Rust can read this value to know which piece to place.
+    in-out property <string>       editor-piece-id:       "";
+    /// Position options — synchronized with the PositionEditor component.
+    in-out property <bool>         editor-white-to-move:  true;
+    in-out property <bool>         editor-castle-wk:      true;
+    in-out property <bool>         editor-castle-wq:      true;
+    in-out property <bool>         editor-castle-bk:      true;
+    in-out property <bool>         editor-castle-bq:      true;
+    /// Opens the editor and initializes the board from the current position.
+    callback open-position-editor();
+    /// Click on a square of the editor board (row, col).
+    callback editor-square-clicked(int, int);
+    /// The user confirms the position → Rust generates the FEN and starts the game (or returns to the wizard).
+    callback editor-validate();
+    /// The user clicks "Starting position" → Rust puts all 32 pieces back in place.
+    callback editor-reset-position();
+    /// The user clicks "Clear all" → Rust empties the 64 squares.
+    callback editor-clear-board();
+    /// Ergonomics follow-up 10/07/2026 — 3 buttons "identical (same principle)" to
+    /// those of the main window, applied to the position currently being
+    /// construction in the editor (not to any ongoing game).
+    callback editor-export-board-png();
+    callback editor-copy-fen();
+    callback editor-paste-fen();
+
+    // ── Main layout ──────────────────────────────────────────────────
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── Header ───────────────────────────────────────────────────────
+        Rectangle {
+            height: 48px;
+            background: Theme.crust;
+            drop-shadow-blur:     6px;
+            drop-shadow-offset-y: 3px;
+            drop-shadow-color: Theme.shadow;
+            // z: 1 → the header paints after the content → overflowing tooltips
+            // remain visible over the board (no implicit clip)
+            z: 1;
+
+            HorizontalLayout {
+                padding-left: 16px; padding-right: 8px;
+                alignment: start;
+
+                Rectangle { horizontal-stretch: 1; }
+
+                // "New game" button in the header
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 10px;
+
+                    Rectangle {
+                        width: 128px;
+                        border-radius: 6px;
+                        background: ta-np.has-hover
+                            ? Theme.blue.with-alpha(0.82)
+                            : Theme.blue.with-alpha(0.70);
+                        animate background { duration: 100ms; }
+
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "♟  " + Tr.menu-file-new-game;
+                            color: #ffffff; font-size: 11px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-np := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.open-new-game(); }
+                        }
+                    }
+                }
+
+                // Export PGN button (💾) — saves the game to a .pgn file
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 2px;
+                    TooltipIconButton {
+                        icon-text: "💾"; icon-size: 15px;
+                        tooltip-text: Tr.tooltip-export-pgn;
+                        clicked => { root.export-pgn(); }
+                    }
+                }
+
+                // Import PGN button (📂) — opens a .pgn file and loads the game
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 2px;
+                    TooltipIconButton {
+                        icon-text: "📂"; icon-size: 15px;
+                        tooltip-text: Tr.tooltip-import-pgn;
+                        clicked => { root.import-pgn(); }
+                    }
+                }
+
+                // Print button (🖨) — generates a PDF (board + moves), PHASE 25.
+                // Visible regardless of the game type.
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 2px;
+                    TooltipIconButton {
+                        icon-text: "🖨"; icon-size: 15px;
+                        tooltip-text: Tr.tooltip-print-game;
+                        clicked => { root.print-game(); }
+                    }
+                }
+
+                // Export PNG button (📸) — snapshot of the displayed board, PHASE 76.
+                // Placed right next to the PDF export (user decision).
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 6px;
+                    TooltipIconButton {
+                        icon-text: "📸"; icon-size: 15px;
+                        tooltip-text: Tr.tooltip-export-board-png;
+                        clicked => { root.export-board-png(); }
+                    }
+                }
+
+                // Undo move button (↩) — H vs H only, visible if ≥ 1 move played
+                if root.current-game-mode == 0
+                   && root.moves.length > 0
+                   && !root.is-game-over: HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 4px;
+                    TooltipIconButton {
+                        icon-text: "↩"; icon-size: 16px;
+                        tooltip-text: Tr.tooltip-undo;
+                        clicked => { root.undo-move(); }
+                    }
+                }
+
+                // FEN buttons — copy (📋) and paste (📥)
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 2px;
+                    spacing: 2px;
+
+                    TooltipIconButton {
+                        width: 28px;
+                        icon-text: "📋"; icon-size: 13px;
+                        tooltip-text: Tr.tooltip-copy-fen;
+                        clicked => { root.copy-fen(); }
+                    }
+
+                    TooltipIconButton {
+                        width: 28px;
+                        icon-text: "📥"; icon-size: 13px;
+                        tooltip-text: Tr.tooltip-paste-fen;
+                        clicked => { root.paste-fen(); }
+                    }
+                }
+
+                // Board flip button — vector icon + tooltip
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 6px;
+
+                    Rectangle {
+                        width: 32px; height: 32px;
+                        border-radius: 4px;
+                        background: ta-flip.has-hover ? Theme.hover : Theme.surface0;
+
+                        // Cross-platform vector icon: two arrows ←→
+                        Path {
+                            x: 6px; y: 9px;
+                            width: 20px; height: 14px;
+                            viewbox-width: 20; viewbox-height: 14;
+                            fill: Colors.transparent;
+                            stroke: root.board-flipped ? Theme.blue : Theme.text;
+                            stroke-width: 1.8px;
+                            commands: "M 1 3.5 L 16 3.5 M 12 1 L 16 3.5 L 12 6 M 19 10.5 L 4 10.5 M 8 8 L 4 10.5 L 8 13";
+                        }
+
+                        // Tooltip
+                        if ta-flip.has-hover: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height + 5px;
+                            width: tip-flip.preferred-width + 16px;
+                            height: 22px;
+                            background: Theme.surface1;
+                            border-radius: 4px;
+                            drop-shadow-blur: 4px;
+                            drop-shadow-color: Theme.shadow;
+                            z: 200;
+                            tip-flip := Text {
+                                width: parent.width; height: parent.height;
+                                text: Tr.tooltip-flip-board;
+                                color: Theme.text; font-size: 11px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+
+                        ta-flip := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.flip-board(); }
+                        }
+                    }
+                }
+
+                // Assist button (💡) — PHASE 68. Hidden in Puzzle mode (4):
+                // the point of a puzzle is to calculate it yourself, tactical
+                // assistance would defeat the exercise (decision made with
+                // the user). Tinted blue when active, like the
+                // board-flip button above.
+                if root.current-game-mode != 4: HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 6px;
+                    TooltipIconButton {
+                        icon-text: "💡"; icon-size: 15px;
+                        icon-color: root.assist-mode-active ? Theme.blue : Theme.text;
+                        tooltip-text: Tr.tooltip-assist-mode;
+                        clicked => { root.toggle-assist-mode(); }
+                    }
+                }
+
+                // "?" hint button — hidden if M vs M mode or if the game is over.
+                // In Puzzle mode (4), also hidden if the wizard's "Hint button
+                // while solving" setting (PHASE 14, Step 5) is disabled.
+                if root.current-game-mode != 2
+                   && (root.current-game-mode != 4 || root.puzzle-hint-button): HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 6px;
+
+                    Rectangle {
+                        width: 32px;
+                        border-radius: 4px;
+                        // Grayed out if no hint engine configured or if a calculation is in progress
+                        property <bool> hint-active: root.hint-engine-path != ""
+                                                   && !root.hint-computing
+                                                   && !root.is-game-over;
+                        background: ta-hint.has-hover && hint-active
+                            ? Theme.hover : Theme.surface0;
+
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: root.hint-computing ? "…" : "?";
+                            color: parent.hint-active ? Theme.peach : Theme.overlay0;
+                            font-size: 16px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+
+                        // Tooltip
+                        if ta-hint.has-hover: Rectangle {
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height + 5px;
+                            width: tip-hint.preferred-width + 16px;
+                            height: 22px;
+                            background: Theme.surface1;
+                            border-radius: 4px;
+                            drop-shadow-blur: 4px;
+                            drop-shadow-color: Theme.shadow;
+                            z: 200;
+                            tip-hint := Text {
+                                width: parent.width; height: parent.height;
+                                text: Tr.tooltip-hint;
+                                color: Theme.text; font-size: 11px;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+
+                        ta-hint := TouchArea {
+                            mouse-cursor: parent.hint-active ? pointer : default;
+                            enabled: parent.hint-active;
+                            clicked => { root.request-hint(); }
+                        }
+                    }
+                }
+
+                // Theme button (☀ = switch to light  /  ☾ = switch to dark)
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 6px;
+                    TooltipIconButton {
+                        icon-text: Theme.is-dark ? "☀" : "☾";
+                        icon-size: 14px;
+                        tooltip-text: Tr.tooltip-theme;
+                        clicked => { Theme.is-dark = !Theme.is-dark; }
+                    }
+                }
+
+                // Preferences button (language, etc.)
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 4px;
+                    TooltipIconButton {
+                        icon-text: "⚙"; icon-size: 14px;
+                        tooltip-text: Tr.tooltip-prefs;
+                        clicked => { root.show-preferences = true; }
+                    }
+                }
+
+                // Pause / Resume button — visible only in timed games (not M vs M)
+                if root.show-clocks && !root.is-game-over && root.current-game-mode != 2: HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 4px;
+                    TooltipIconButton {
+                        icon-text: root.game-paused ? "▶" : "⏸";
+                        icon-size: 14px;
+                        tooltip-text: root.game-paused ? Tr.app-pause-resume : Tr.app-pause-pause;
+                        clicked => { root.toggle-pause(); }
+                    }
+                }
+
+                // "About" button (ℹ)
+                HorizontalLayout {
+                    padding-top: 9px; padding-bottom: 9px; padding-right: 8px;
+                    TooltipIconButton {
+                        icon-text: "ℹ"; icon-size: 14px;
+                        // Reuses the key already existing and already translated in all 40 languages
+                        // (Help → About menu), instead of a second hardcoded literal.
+                        tooltip-text: Tr.menu-help-about;
+                        clicked => { root.show-about = true; }
+                    }
+                }
+            }
+        }
+
+        // ── Central content (board + draggable splitter + panel) ─
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+
+            // ── Puzzle mode control bar (PHASE 14, Step 6;
+            //    repositioned outside the board area during the bugfix from
+            //    03/07/2026) ────────────────────────────────────────────────
+            // Actual block (not an overlay stacked on the board): occupies a
+            // fixed space (54px + 8px margin = 62px) reserved at the top of the
+            // board column, whose position/height mirror-adjusts
+            // right below it. Before this fix, this banner stayed
+            // shown continuously throughout the entire solving session (unlike
+            // `GameOverBanner`, which only shows at the end of the game) and
+            // therefore permanently covered the top of the board. The panel
+            // side panel keeps its full height (simple choice validated
+            // with the user, no perfect vertical alignment between
+            // the two columns in Puzzle mode).
+            PuzzleControlBar {
+                x: 8px;
+                y: 8px;
+                width:  root.splitter-pos - 12px;
+                height: 54px;
+                opacity: root.puzzle-mode-active ? 1.0 : 0.0;
+                animate opacity { duration: 250ms; easing: ease-in-out; }
+                title-text:    root.puzzle-title;
+                subtitle-text: root.puzzle-subtitle;
+                solved:        root.puzzle-solved;
+                failed:        root.puzzle-failed;
+                show-reveal:   root.puzzle-show-reveal;
+                show-solution => { root.puzzle-show-solution(); }
+                next-puzzle   => { root.puzzle-next(); }
+                quit          => { root.puzzle-quit(); }
+            }
+
+            // ── Non-blocking banners (end of game / variation editing) ─
+            // Repositioned outside the board area (user feedback
+            // 04/07/2026: "generally speaking, there needs to be a reserved area for
+            // banners" — same fix as `PuzzleControlBar` on
+            // 03/07/2026). Actual blocks with reserved space, stacked one under
+            // the other when both are active at the same time (variation
+            // created after the game ends) — the board area right
+            // below mirror-adjusts (see `go-banner-active`/
+            // `var-banner-active`/`banners-height`).
+            GameOverBanner {
+                x: 8px;
+                y: 8px;
+                width: root.splitter-pos - 12px;
+                opacity: (root.is-game-over && root.current-game-mode != 4) ? 1.0 : 0.0;
+                animate opacity { duration: 250ms; easing: ease-in-out; }
+                active:      root.is-game-over && root.current-game-mode != 4;
+                result-text: root.game-over-result;
+                reason-text: root.game-over-reason;
+                new-game => { root.open-new-game(); }
+            }
+
+            VariationEditBanner {
+                x: 8px;
+                y: 8px + ((root.is-game-over && root.current-game-mode != 4) ? 68px : 0px);
+                width: root.splitter-pos - 12px;
+                opacity: ((root.viewed-ply >= 0 || root.variation-editing)
+                             && (root.current-game-mode == 0 || root.current-game-mode == 1)
+                             && !root.is-tournament-mode)
+                             ? 1.0 : 0.0;
+                animate y       { duration: 350ms; easing: ease-out; }
+                animate opacity { duration: 250ms; easing: ease-in-out; }
+                editing: root.variation-editing;
+                enter-variation => { root.enter-variation-editing(); }
+                exit-variation  => { root.exit-variation-editing(); }
+            }
+
+            // ── Board area ────────────────────────────────────────────
+            Rectangle {
+                x: 8px;
+                property <bool> go-banner-active:
+                    root.is-game-over && root.current-game-mode != 4;
+                property <bool> var-banner-active:
+                    (root.viewed-ply >= 0 || root.variation-editing)
+                    && (root.current-game-mode == 0 || root.current-game-mode == 1)
+                    && !root.is-tournament-mode;
+                property <length> banners-height:
+                    (go-banner-active  ? 68px : 0px) +
+                    (var-banner-active ? 52px : 0px);
+                y:      root.puzzle-mode-active
+                            ? 70px
+                            : (banners-height > 0px ? (8px + banners-height) : 8px);
+                width:  root.splitter-pos - 12px;
+                height: root.puzzle-mode-active
+                            ? (parent.height - 78px)
+                            : (banners-height > 0px
+                                ? (parent.height - 16px - banners-height)
+                                : (parent.height - 16px));
+                animate y      { duration: 350ms; easing: ease-out; }
+                animate height { duration: 350ms; easing: ease-out; }
+                background: Theme.mantle;
+                border-radius: 8px;
+                clip: true;
+
+                // ── Top captures bar (Phase 19) ──────────────────
+                // Side visually at the top: Black by default, White if
+                // the board is flipped.
+                CapturedPiecesBar {
+                    x: 0px; y: 0px;
+                    width: parent.width;
+                    pieces:        root.board-flipped ? root.captured-by-white : root.captured-by-black;
+                    material-diff: root.board-flipped ? root.material-diff     : -root.material-diff;
+                }
+
+                // ── Actual play area (shrunk to leave
+                //    room for the two captures bars) ───────────────────
+                Rectangle {
+                    x: 0px;
+                    y: 26px;
+                    width:  parent.width;
+                    height: parent.height - 52px;
+                    clip: true;
+
+                    // ── Evaluation bar (Phase 11.3) ──────────────────
+                    // MUST be declared BEFORE ChessBoard: Slint paints
+                    // children in declaration order, so ChessBoard
+                    // (declared after) covers the bar wherever they overlap.
+                    //
+                    // Positioning: the bar follows the board's left edge
+                    // with a fixed 4px gap, never leaving the area
+                    // (clamp ≥ 2px). Mirror formula of ChessBoard.sz/.x:
+                    //   board-sz = min(w,h) − 20px
+                    //   board-x  = (w − board-sz) / 2
+                    //   bar-x    = max(2px, board-x − 12px)  [8px bar + 4px gap]
+                    EvalBar {
+                        property <length> board-sz:
+                            min(parent.width, parent.height) - 20px;
+                        property <length> board-x:
+                            (parent.width - board-sz) / 2;
+                        x:       max(2px, board-x - 12px);
+                        y:       (parent.height - board-sz) / 2;
+                        width:   8px;
+                        height:  board-sz;
+                        fraction: root.eval-fraction;
+                        flipped:  root.board-flipped;
+                        visible:  root.eval-bar-visible;
+                        opacity:  root.eval-bar-visible ? 1.0 : 0.0;
+                        animate opacity { duration: 350ms; easing: ease-in-out; }
+                    }
+
+                    ChessBoard {
+                        property <length> sz: min(parent.width, parent.height) - 20px;
+                        width: sz;
+                        height: sz;
+                        x: (parent.width  - self.width)  / 2;
+                        y: (parent.height - self.height) / 2;
+                        squares:         root.squares;
+                        flipped:         root.board-flipped;
+                        hint-arrow-path: root.hint-arrow-path;
+                        square-clicked(r, c) => {
+                            // PHASE 16, Step 5, decision 3 — updated PHASE 26,
+                            // Step 3: while paused, clicks stay blocked on the
+                            // current position (no accidentally resuming a live
+                            // game), but are passed through normally in
+                            // history-viewing mode (viewed-ply >= 0) or during
+                            // variation editing. `variation-editing` (rather than
+                            // just `viewed-ply >= 0`) is the condition that
+                            // fixes the original bug: `viewed-ply` falls back to -1
+                            // as soon as the first variation move is played, whereas
+                            // `variation-editing` stays true until "End the
+                            // variation" — the board must therefore never
+                            // re-lock between two moves of the same variation.
+                            if !root.game-paused || root.viewed-ply >= 0 || root.variation-editing {
+                                root.hint-arrow-path = "";   // clears the hint arrow
+                                root.square-clicked(r, c);
+                            }
+                        }
+                    }
+
+                    // ── Pause overlay ──────────────────────────────────
+                    // Hidden in history-viewing mode (viewed-ply >= 0)
+                    // or during variation editing (see the square-clicked
+                    // comment above — PHASE 26 bugfix, Step 3).
+                    if root.game-paused && root.viewed-ply < 0 && !root.variation-editing: Rectangle {
+                        width: parent.width; height: parent.height;
+                        background: Colors.black.with-alpha(0.55);
+                        z: 10;
+
+                        VerticalLayout {
+                            x: 0; y: 0; width: parent.width; height: parent.height;
+                            alignment: center;
+                            spacing: 20px;
+
+                            Text {
+                                text: "⏸  " + Tr.app-pause-banner-title;
+                                color: #ffffff; font-size: 22px; font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 160px; height: 40px;
+                                    border-radius: 8px;
+                                    background: ta-resume.has-hover
+                                        ? Theme.blue.with-alpha(0.90)
+                                        : Theme.blue.with-alpha(0.75);
+                                    animate background { duration: 100ms; }
+                                    Text {
+                                        width: parent.width; height: parent.height;
+                                        text: "▶  " + Tr.app-pause-resume;
+                                        color: #ffffff; font-size: 14px; font-weight: 600;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                    ta-resume := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.toggle-pause(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Note: the "End of game" and "Create/End a
+                    // variation" banners are no longer here since the fix from
+                    // 04/07/2026 ("generally speaking, there needs to be a reserved
+                    // area for banners") — see `GameOverBanner` and
+                    // `VariationEditBanner` right above this board
+                    // area (actual blocks with reserved space, no longer
+                    // overlays stacked on the board), same principle as
+                    // `PuzzleControlBar` since 03/07/2026.
+
+                    // ── Promotion modal ─────────────────────────────────
+                    if root.show-promotion-modal: PromotionModal {
+                        width:  parent.width;
+                        height: parent.height;
+                        is-white: root.promotion-is-white;
+                        piece-chosen(code) => { root.promote-chosen(code); }
+                    }
+                }
+
+                // ── Bottom captures bar (Phase 19) ───────────────────
+                // Side visually at the bottom: White by default, Black if
+                // the board is flipped.
+                CapturedPiecesBar {
+                    x: 0px; y: parent.height - 26px;
+                    width: parent.width;
+                    pieces:        root.board-flipped ? root.captured-by-black : root.captured-by-white;
+                    material-diff: root.board-flipped ? -root.material-diff    : root.material-diff;
+                }
+            }
+
+            // ── Draggable splitter bar ─────────────────────────────
+            // 8px container (clickable area) centered on splitter-pos.
+            Rectangle {
+                x: root.splitter-pos - 4px;
+                y: 8px;
+                width:  8px;
+                height: parent.height - 16px;
+                background: transparent;
+
+                // Visible line (4px, centered within the 8px clickable area)
+                Rectangle {
+                    x: 2px; y: 0px;
+                    width: 4px; height: parent.height;
+                    border-radius: 2px;
+                    background: ta-split.has-hover ? Theme.surface1 : Theme.surface0;
+                    animate background { duration: 150ms; }
+                }
+
+                // Grip — 3 small dots vertically centered
+                Rectangle {
+                    width: 3px; height: 3px; border-radius: 1.5px;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height / 2 - 10px;
+                    background: Theme.overlay0;
+                    opacity: ta-split.has-hover ? 1.0 : 0.45;
+                    animate opacity { duration: 150ms; }
+                }
+                Rectangle {
+                    width: 3px; height: 3px; border-radius: 1.5px;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height / 2 - 1.5px;
+                    background: Theme.overlay0;
+                    opacity: ta-split.has-hover ? 1.0 : 0.45;
+                    animate opacity { duration: 150ms; }
+                }
+                Rectangle {
+                    width: 3px; height: 3px; border-radius: 1.5px;
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height / 2 + 7px;
+                    background: Theme.overlay0;
+                    opacity: ta-split.has-hover ? 1.0 : 0.45;
+                    animate opacity { duration: 150ms; }
+                }
+
+                ta-split := TouchArea {
+                    mouse-cursor: col-resize;
+                    moved => {
+                        // Each moved event gives the incremental delta since the
+                        // last event (mouse-x - pressed-x). We add it to the
+                        // current position. Bounds: board ≥ 300px, panel ≥ 240px.
+                        root.splitter-pos = clamp(
+                            root.splitter-pos + (self.mouse-x - self.pressed-x),
+                            312px,
+                            root.width - 252px
+                        );
+                    }
+                }
+            }
+
+            // ── Right side panel ─────────────────────────────────────
+            Rectangle {
+                x: root.splitter-pos + 4px;
+                y: 8px;
+                width:  parent.width - root.splitter-pos - 12px;
+                height: parent.height - 16px;
+                background: Theme.mantle;
+                border-radius: 8px;
+
+                if !root.is-tournament-mode: VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    // ── Black analysis panel ─────────────────────────────
+                    // In Puzzle mode (4), Multi-PV is forced hidden: the eval
+                    // bar stays active but the suggested line (which would reveal
+                    // the solution) is not shown (PHASE 14, Step 6).
+                    Rectangle {
+                        height: (root.current-game-mode == 4 || root.analysis-multipv-black == 0)
+                            ? 38px : 38px + root.analysis-multipv-black * 34px;
+                        animate height { duration: 150ms; easing: ease-in-out; }
+                        clip: true;
+                        background: Theme.base;
+                        border-radius: 8px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px; alignment: start;
+                            // Header
+                            HorizontalLayout {
+                                spacing: 4px; alignment: start; height: 22px;
+                                Rectangle { width: 10px; height: 10px; border-radius: 2px; background: #333333; border-width: 1px; border-color: Theme.overlay0; }
+                                Text { text: Tr.board-black; color: !root.is-white-turn ? Theme.text : Theme.overlay0; font-size: 9px; font-weight: 700; vertical-alignment: center; }
+                                if root.engine-thinking && !root.is-white-turn: Text { text: "●"; color: Theme.blue; font-size: 8px; vertical-alignment: center; }
+                                Text {
+                                    text: root.analysis-engine-name != "" ? "⚙ " + root.analysis-engine-name : "⚙ ?";
+                                    color: root.analysis-engine-name != "" ? Theme.overlay0 : Theme.peach;
+                                    font-size: 8px; vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                if root.current-game-mode != 4: HorizontalLayout {
+                                    spacing: 4px;
+                                    for n-val in [0, 1, 2, 3, 5]: Rectangle {
+                                        width: 16px; height: 14px; border-radius: 3px;
+                                        background: root.analysis-multipv-black == n-val
+                                            ? (n-val == 0 ? Theme.overlay0 : Theme.blue)
+                                            : (ta-nb.has-hover ? Theme.hover : Theme.surface0);
+                                        Text {
+                                            width: parent.width; height: parent.height; text: n-val;
+                                            color: root.analysis-multipv-black == n-val ? #ffffff : Theme.subtext0;
+                                            font-size: 7px; font-weight: 700;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        ta-nb := TouchArea { mouse-cursor: pointer; clicked => { root.analysis-multipv-black = n-val; root.multipv-black-changed(n-val); } }
+                                    }
+                                }
+                            }
+                            // Black PV lines — hidden in Puzzle mode (see above).
+                            if root.current-game-mode != 4: VerticalLayout {
+                                spacing: 2px;
+                                for line in root.engine-pv-lines-black: Rectangle {
+                                height: 30px; border-radius: 4px;
+                                background: root.pv-selected-rank-black == line.rank
+                                    ? Theme.blue.with-alpha(0.10)
+                                    : (ta-pvnb.has-hover ? Theme.hover : transparent);
+                                animate background { duration: 80ms; }
+                                HorizontalLayout {
+                                    height: 30px; spacing: 5px; alignment: start; padding-left: 2px; padding-right: 2px;
+                                    Text { text: line.rank; color: line.rank == 1 ? Theme.blue : Theme.overlay0; font-size: 9px; font-weight: 700; width: 8px; vertical-alignment: center; }
+                                    Text {
+                                        text: line.score + "  d" + line.depth;
+                                        color: (root.engine-thinking && !root.is-white-turn) ? Theme.blue
+                                             : root.pv-selected-rank-black == line.rank ? Theme.blue : Theme.text;
+                                        font-size: 11px; font-weight: 700; width: 72px; vertical-alignment: center;
+                                    }
+                                    Text { text: line.pv; color: root.pv-selected-rank-black == line.rank ? Theme.text : Theme.subtext0; font-size: 10px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                                }
+                                ta-pvnb := TouchArea { mouse-cursor: pointer; clicked => {
+                                    if root.pv-selected-rank-black == line.rank { root.pv-selected-rank-black = 0; root.hint-arrow-path = ""; }
+                                    else { root.pv-selected-rank-black = line.rank; root.pv-line-black-clicked(line.rank); }
+                                } }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Black player ───────────────────────────────────────
+                    Rectangle {
+                        height: 56px;
+                        background: Theme.surface0;
+                        border-radius: 8px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        // Blue highlight when it's Black's turn
+                        border-width: (root.show-clocks && root.black-clock-active) ? 1.5px : 0px;
+                        border-color: Theme.blue;
+                        animate border-width { duration: 200ms; }
+
+                        HorizontalLayout {
+                            padding: 12px; spacing: 10px; alignment: start;
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 18px; height: 18px;
+                                    background: Theme.surface1;
+                                    border-radius: 9px;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text {
+                                    text: Tr.board-black;
+                                    color: Theme.overlay0; font-size: 9px;
+                                    letter-spacing: 0.5px;
+                                }
+                                Text {
+                                    text: root.black-player-name;
+                                    color: Theme.text; font-size: 13px; font-weight: 600;
+                                }
+                            }
+                            // Black clock (hidden if the time control has no clock)
+                            if root.show-clocks: ClockDisplay {
+                                clock-text:   root.black-clock-text;
+                                clock-ms:     root.black-clock-ms;
+                                clock-active: root.black-clock-active;
+                                blink-tick:   root.blink-tick;
+                            }
+                        }
+                    }
+
+                    // ── Move history ──────────────────────────────
+                    MoveList {
+                        vertical-stretch: 1;
+                        border-radius: 8px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        moves:       root.moves;
+                        current-ply: root.viewed-ply;
+                        editing-comment-node-id: root.editing-comment-node-id;
+                        move-clicked(ply) => { root.move-clicked(ply); }
+                        move-right-clicked(node-id, label, is-variation) => {
+                            // node-id == -1: cell with no move (e.g. an empty
+                            // black cell at the end of the game on White's side, or no
+                            // variation) — no menu to open.
+                            if (node-id >= 0) {
+                                root.context-menu-node-id = node-id;
+                                root.context-menu-move-label = label;
+                                root.context-menu-is-variation = is-variation;
+                            }
+                        }
+                        comment-saved(node-id, text) => {
+                            root.move-comment-saved(node-id, text);
+                            root.editing-comment-node-id = -1;
+                        }
+                        comment-cancelled => { root.editing-comment-node-id = -1; }
+                    }
+
+                    // Note (PHASE 16, Step 5): the "✂ Resume from
+                    // this position" bar has been removed — playing a move from
+                    // the history now always creates a variation
+                    // (decision 1) rather than truncating the existing line.
+
+                    // ── White player ──────────────────────────────────────
+                    Rectangle {
+                        height: 56px;
+                        background: Theme.surface0;
+                        border-radius: 8px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        // Blue highlight when it's White's turn
+                        border-width: (root.show-clocks && root.white-clock-active) ? 1.5px : 0px;
+                        border-color: Theme.blue;
+                        animate border-width { duration: 200ms; }
+
+                        HorizontalLayout {
+                            padding: 12px; spacing: 10px; alignment: start;
+
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 18px; height: 18px;
+                                    background: Theme.rosewater;
+                                    border-radius: 9px;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text {
+                                    text: Tr.board-white;
+                                    color: Theme.overlay0; font-size: 9px;
+                                    letter-spacing: 0.5px;
+                                }
+                                Text {
+                                    text: root.white-player-name;
+                                    color: Theme.text; font-size: 13px; font-weight: 600;
+                                }
+                            }
+                            // White clock
+                            if root.show-clocks: ClockDisplay {
+                                clock-text:   root.white-clock-text;
+                                clock-ms:     root.white-clock-ms;
+                                clock-active: root.white-clock-active;
+                                blink-tick:   root.blink-tick;
+                            }
+                        }
+                    }
+
+                    // ── Evaluation graph ───────────────────────────────
+                    ScoreGraph {
+                        height: 76px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        scores:           root.score-history;
+                        white-commands:   root.white-curve-path;
+                        black-commands:   root.black-curve-path;
+                        // viewed-ply is 1-based; score-history is 0-based.
+                        // ply=-1 (current position) → last bar.
+                        current-ply: root.viewed-ply > 0
+                                     ? root.viewed-ply - 1
+                                     : root.score-history.length - 1;
+                    }
+
+                    // ── White analysis panel ────────────────────────────
+                    // Same Multi-PV hiding as the Black panel in Puzzle mode
+                    // (PHASE 14, Step 6) — see equivalent comment above.
+                    Rectangle {
+                        height: (root.current-game-mode == 4 || root.analysis-multipv-white == 0)
+                            ? 38px : 38px + root.analysis-multipv-white * 34px;
+                        animate height { duration: 150ms; easing: ease-in-out; }
+                        clip: true;
+                        background: Theme.base;
+                        border-radius: 8px;
+                        drop-shadow-blur: 4px; drop-shadow-offset-y: 2px;
+                        drop-shadow-color: Theme.shadow;
+                        VerticalLayout {
+                            padding: 8px; spacing: 2px; alignment: start;
+                            // Header
+                            HorizontalLayout {
+                                spacing: 4px; alignment: start; height: 22px;
+                                Rectangle { width: 10px; height: 10px; border-radius: 2px; background: #eeeeee; border-width: 1px; border-color: Theme.overlay0; }
+                                Text { text: Tr.board-white; color: root.is-white-turn ? Theme.text : Theme.overlay0; font-size: 9px; font-weight: 700; vertical-alignment: center; }
+                                if root.engine-thinking && root.is-white-turn: Text { text: "●"; color: Theme.blue; font-size: 8px; vertical-alignment: center; }
+                                Text {
+                                    text: root.analysis-engine-name != "" ? "⚙ " + root.analysis-engine-name : "⚙ ?";
+                                    color: root.analysis-engine-name != "" ? Theme.overlay0 : Theme.peach;
+                                    font-size: 8px; vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                if root.current-game-mode != 4: HorizontalLayout {
+                                    spacing: 4px;
+                                    for n-val in [0, 1, 2, 3, 5]: Rectangle {
+                                        width: 16px; height: 14px; border-radius: 3px;
+                                        background: root.analysis-multipv-white == n-val
+                                            ? (n-val == 0 ? Theme.overlay0 : Theme.blue)
+                                            : (ta-nw.has-hover ? Theme.hover : Theme.surface0);
+                                        Text {
+                                            width: parent.width; height: parent.height; text: n-val;
+                                            color: root.analysis-multipv-white == n-val ? #ffffff : Theme.subtext0;
+                                            font-size: 7px; font-weight: 700;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                        ta-nw := TouchArea { mouse-cursor: pointer; clicked => { root.analysis-multipv-white = n-val; root.multipv-white-changed(n-val); } }
+                                    }
+                                }
+                            }
+                            // White PV lines — hidden in Puzzle mode (see above).
+                            if root.current-game-mode != 4: VerticalLayout {
+                                spacing: 2px;
+                                for line in root.engine-pv-lines-white: Rectangle {
+                                height: 30px; border-radius: 4px;
+                                background: root.pv-selected-rank-white == line.rank
+                                    ? Theme.blue.with-alpha(0.10)
+                                    : (ta-pvnw.has-hover ? Theme.hover : transparent);
+                                animate background { duration: 80ms; }
+                                HorizontalLayout {
+                                    height: 30px; spacing: 5px; alignment: start; padding-left: 2px; padding-right: 2px;
+                                    Text { text: line.rank; color: line.rank == 1 ? Theme.blue : Theme.overlay0; font-size: 9px; font-weight: 700; width: 8px; vertical-alignment: center; }
+                                    Text {
+                                        text: line.score + "  d" + line.depth;
+                                        color: (root.engine-thinking && root.is-white-turn) ? Theme.blue
+                                             : root.pv-selected-rank-white == line.rank ? Theme.blue : Theme.text;
+                                        font-size: 11px; font-weight: 700; width: 72px; vertical-alignment: center;
+                                    }
+                                    Text { text: line.pv; color: root.pv-selected-rank-white == line.rank ? Theme.text : Theme.subtext0; font-size: 10px; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                                }
+                                ta-pvnw := TouchArea { mouse-cursor: pointer; clicked => {
+                                    if root.pv-selected-rank-white == line.rank { root.pv-selected-rank-white = 0; root.hint-arrow-path = ""; }
+                                    else { root.pv-selected-rank-white = line.rank; root.pv-line-white-clicked(line.rank); }
+                                } }
+                                }
+                            }
+                        }
+                    }
+
+                }
+
+                // ── Tournament panel (replaces the standard content) ────────
+                if root.is-tournament-mode: TournamentPanel {
+                    x: 0; y: 0; width: parent.width; height: parent.height;
+                    standings:     root.tournament-standings;
+                    current-white: root.tournament-current-white;
+                    current-black: root.tournament-current-black;
+                    games-played:  root.tournament-games-played;
+                    total-games:   root.tournament-total-games;
+                    progress:      root.tournament-progress;
+                    finished:      root.tournament-finished;
+                    stop-tournament => { root.stop-tournament(); }
+                }
+            }
+        }
+
+        // ── Status bar ───────────────────────────────────────────────
+        Rectangle {
+            height: 34px;
+            background: Theme.crust;
+
+            HorizontalLayout {
+                padding-left: 16px; padding-right: 16px; spacing: 6px; alignment: start;
+
+                // "Engine thinking…" indicator (pulses via engine-playing)
+                if root.engine-playing: Text {
+                    text: "⚙";
+                    color: Theme.blue; font-size: 12px;
+                    vertical-alignment: center;
+                    animate opacity {
+                        duration: 700ms; iteration-count: -1;
+                        easing: ease-in-out;
+                    }
+                }
+
+                Text {
+                    text: root.engine-playing
+                        ? "Le moteur réfléchit…"
+                        : root.status-text;
+                    color: root.engine-playing ? Theme.blue
+                         : root.is-white-turn   ? Theme.rosewater
+                                                 : Theme.subtext0;
+                    font-size: 12px; font-weight: 500;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ── Fullscreen overlays (above all content) ───────────────────────────
+
+    /// "New game" wizard (shown over the interface).
+    if root.show-setup-wizard: GameSetupWizard {
+        x: 0; y: 0; width: root.width; height: root.height;
+        engine-path-w      <=> root.wizard-engine-path-w;
+        engine-path-b      <=> root.wizard-engine-path-b;
+        wizard-pgn-filename <=> root.wizard-pgn-filename;
+        wizard-start-fen   <=> root.wizard-start-fen;
+        wizard-start-fen-from-base <=> root.wizard-start-fen-from-base;
+        step               <=> root.wizard-step;
+        available-engines:   root.saved-engines;
+        puzzle-count:        root.puzzle-count;
+        // Sum of both databases (follow-up 11/07/2026): the wizard's
+        // "Navigation Base" card doesn't distinguish the source, it activates as soon
+        // as AT LEAST ONE of the two databases contains games (see
+        // `open-navigation-base` below for the default source choice
+        // when the browser is actually opened).
+        reference-game-count: root.reference-pgn-game-count + root.reference-scid-game-count;
+        puzzle-hint-theme  <=> root.puzzle-hint-theme;
+        puzzle-hint-button <=> root.puzzle-hint-button;
+        launch(mode, hcolor, pw, pb, lw, lb, tc, wts, bts) => {
+            root.show-setup-wizard = false;
+            root.setup-start(mode, hcolor, pw, pb, lw, lb, tc, wts, bts);
+        }
+        launch-puzzle(hint-theme, hint-button) => {
+            root.show-setup-wizard = false;
+            root.setup-start-puzzle(hint-theme, hint-button);
+        }
+        pick-pgn => { root.wizard-pick-pgn(); }
+        cancel    => { root.show-setup-wizard = false; }
+        quit-app  => { root.quit-app(); }
+        open-about => { root.show-about = true; }
+        open-preferences => {
+            root.show-preferences = true;
+        }
+        open-tournament => {
+            root.show-setup-wizard = false;
+            root.show-tournament-setup = true;
+        }
+        open-position-editor-wizard => {
+            root.editor-from-wizard = true;
+            root.show-setup-wizard  = false;
+            root.open-position-editor();
+        }
+        open-navigation-base => {
+            // PHASE 82, step 7: opens the browser screen (filterable game
+            // list). The card is only clickable in the first place
+            // if reference-game-count (PGN+SCID sum) > 0 (thus after a
+            // successful import, step 5). Filters/page reset to zero on every
+            // opening — a filter draft left over from a
+            // previous session (e.g. "no results") would be confusing to find
+            // as-is when reopening from the wizard.
+            root.show-setup-wizard = false;
+            // Follow-up 11/07/2026: default source = PGN if it contains
+            // games, otherwise SCID (one of the two is necessarily non-empty
+            // since the card is only clickable if their sum is > 0).
+            root.reference-browser-source = root.reference-pgn-game-count > 0 ? 0 : 1;
+            root.reference-browser-page              = 0;
+            root.reference-browser-filter-player      = "";
+            root.reference-browser-filter-elo-min     = "";
+            root.reference-browser-filter-elo-max     = "";
+            root.reference-browser-filter-date-from   = "";
+            root.reference-browser-filter-date-to     = "";
+            root.reference-browser-filter-eco         = "";
+            root.show-reference-browser = true;
+            // Ergonomics follow-up 10/07/2026: a fresh (re)opening of
+            // the screen must also reset the active tab and
+            // any "Opening tree" filter applied during a
+            // previous session — otherwise the game list would silently
+            // reopen restricted to a forgotten selection.
+            root.reference-browser-active-tab = 0;
+            root.tree-filter-clear();
+            root.search-reference-games();
+            root.tree-elo-min = "";
+            root.tree-reset();
+        }
+        open-reference-browser-wizard => {
+            // Ergonomics bugfix 09/07/2026: the 3rd button of step 1, distinct from
+            // `open-navigation-base` (step 0 card) — does NOT close the wizard
+            // (no `root.show-setup-wizard = false`), so that the already-chosen
+            // mode survives (`mode` property, private to `GameSetupWizard`, not
+            // bound to `AppWindow`, lost if the component were destroyed/recreated —
+            // see the documentation of `open-position-editor-wizard`, which has this
+            // flaw). `ReferenceBrowser`/`GameDetailView` are declared further down
+            // in this file, so they paint over the wizard without it being
+            // necessary to hide it.
+            root.reference-browser-from-wizard = true;
+            // Follow-up 11/07/2026: same default source choice as
+            // `open-navigation-base` above.
+            root.reference-browser-source = root.reference-pgn-game-count > 0 ? 0 : 1;
+            root.reference-browser-page              = 0;
+            root.reference-browser-filter-player      = "";
+            root.reference-browser-filter-elo-min     = "";
+            root.reference-browser-filter-elo-max     = "";
+            root.reference-browser-filter-date-from   = "";
+            root.reference-browser-filter-date-to     = "";
+            root.reference-browser-filter-eco         = "";
+            root.show-reference-browser = true;
+            // Ergonomics follow-up 10/07/2026: a fresh (re)opening of
+            // the screen must also reset the active tab and
+            // any "Opening tree" filter applied during a
+            // previous session — otherwise the game list would silently
+            // reopen restricted to a forgotten selection.
+            root.reference-browser-active-tab = 0;
+            root.tree-filter-clear();
+            root.search-reference-games();
+            root.tree-elo-min = "";
+            root.tree-reset();
+        }
+    }
+
+    /// "Replay?" recap (shown over the interface).
+    if root.show-setup-recap: GameSetupRecap {
+        x: 0; y: 0; width: root.width; height: root.height;
+        line1: root.recap-line1;
+        line2: root.recap-line2;
+        line3: root.recap-line3;
+        replay    => { root.show-setup-recap = false; root.setup-replay(); }
+        new-config => {
+            root.show-setup-recap    = false;
+            root.wizard-pgn-filename = "";   // no PGN preloaded in the new wizard
+            root.wizard-start-fen    = "";   // no editor position or database position either
+            root.wizard-start-fen-from-base = false;
+            root.wizard-step         = 0;
+            root.show-setup-wizard   = true;
+        }
+        cancel-recap => { root.show-setup-recap = false; }
+    }
+
+    /// Language selector on first launch (on top of everything else).
+    /// No Close button: the user MUST choose a language.
+    if root.show-language-setup: LanguageSetupScreen {
+        x: 0; y: 0; width: root.width; height: root.height;
+        language-chosen(code) => { root.language-chosen(code); }
+    }
+
+    /// Tournament setup wizard (accessible from the "Engine Tournament" card in the wizard).
+    if root.show-tournament-setup: TournamentSetupWizard {
+        x: 0; y: 0; width: root.width; height: root.height;
+        available-engines: root.saved-engines;
+        start-tournament(kind, gpp, mask, ms) => {
+            root.show-tournament-setup = false;
+            root.start-tournament(kind, gpp, mask, ms);
+        }
+        cancel => { root.show-tournament-setup = false; }
+    }
+
+    /// FEN position editor (Phase 12) — fullscreen overlay.
+    if root.show-position-editor: PositionEditor {
+        x: 0; y: 0; width: root.width; height: root.height;
+        editor-squares    <=> root.editor-squares;
+        flipped:              root.board-flipped;
+        selected-piece-id <=> root.editor-piece-id;
+        white-to-move     <=> root.editor-white-to-move;
+        castle-wk         <=> root.editor-castle-wk;
+        castle-wq         <=> root.editor-castle-wq;
+        castle-bk         <=> root.editor-castle-bk;
+        castle-bq         <=> root.editor-castle-bq;
+        wizard-mode:          root.editor-from-wizard;
+        square-clicked(r, c) => { root.editor-square-clicked(r, c); }
+        validate          => { root.editor-validate(); }
+        reset-position    => { root.editor-reset-position(); }
+        clear-board       => { root.editor-clear-board(); }
+        export-board-png  => { root.editor-export-board-png(); }
+        copy-fen          => { root.editor-copy-fen(); }
+        paste-fen         => { root.editor-paste-fen(); }
+        cancel            => {
+            root.show-position-editor = false;
+            root.editor-piece-id = "";
+            // In wizard mode, "Cancel" returns to the wizard at step 1 (config)
+            if root.editor-from-wizard {
+                root.editor-from-wizard  = false;
+                root.wizard-step         = 1;
+                root.show-setup-wizard   = true;
+            }
+        }
+    }
+
+    /// "About" window — author, license, technologies.
+    if root.show-about: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: Colors.black.with-alpha(0.55);
+        z: 300;
+
+        // Click on the background → close
+        TouchArea { clicked => { root.show-about = false; } }
+
+        // Central card
+        Rectangle {
+            width: 390px;
+            height: 490px;
+            x: (parent.width  - self.width)  / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.base;
+            border-radius: 14px;
+            drop-shadow-blur: 28px;
+            drop-shadow-color: Colors.black.with-alpha(0.45);
+
+            // Block click propagation to the background
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 26px;
+                spacing: 0px;
+
+                // ── Title ──────────────────────────────────────────────────
+                Text {
+                    text: "♟  Vendetta Chess GUI";
+                    font-size: 17px; font-weight: 700;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+                Rectangle { height: 3px; }
+                Text {
+                    // Translated label (i18n "app.version") + number read from
+                    // Cargo.toml on the Rust side — never a hardcoded version here.
+                    text: Tr.app-version + " " + root.app-version-number;
+                    font-size: 11px; font-italic: true;
+                    color: Theme.subtext0;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle { height: 16px; }
+                Rectangle { height: 1px; background: Theme.surface1; }
+                Rectangle { height: 12px; }
+
+                // ── Author ─────────────────────────────────────────────────
+                Text {
+                    text: Tr.about-section-author;
+                    font-size: 9px; font-weight: 700;
+                    color: Theme.subtext0;
+                }
+                Rectangle { height: 5px; }
+                // Two columns: text (left, expandable) / flag (right, fixed size).
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text {
+                            text: "Fabrice Garcia";
+                            font-size: 14px; font-weight: 600;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: "20290 Borgo · Corsica · France";
+                            font-size: 12px;
+                            color: Theme.subtext0;
+                        }
+                    }
+                    // Flag of Corsica, the author's home region — right
+                    // column, about 2 cm wide ("postage stamp" size).
+                    Image {
+                        source: @image-url("../assets/branding/corsica_flag.svg");
+                        width: 76px; height: 46px; image-fit: contain;
+                    }
+                }
+
+                Rectangle { height: 12px; }
+                Rectangle { height: 1px; background: Theme.surface1; }
+                Rectangle { height: 12px; }
+
+                // ── License ────────────────────────────────────────────────
+                Text {
+                    text: Tr.about-section-license;
+                    font-size: 9px; font-weight: 700;
+                    color: Theme.subtext0;
+                }
+                Rectangle { height: 5px; }
+                Text {
+                    text: "GNU General Public License v3 (GPL v3)";
+                    font-size: 12px;
+                    color: Theme.text;
+                }
+
+                Rectangle { height: 12px; }
+                Rectangle { height: 1px; background: Theme.surface1; }
+                Rectangle { height: 12px; }
+
+                // ── Technologies ───────────────────────────────────────────
+                Text {
+                    text: Tr.about-section-technologies;
+                    font-size: 9px; font-weight: 700;
+                    color: Theme.subtext0;
+                }
+                Rectangle { height: 5px; }
+                // Two columns: text (left, expandable) / Rust logo (right, fixed size).
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+                        Text {
+                            text: Tr.about-lang-rust;
+                            font-size: 12px;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: Tr.about-ui-slint;
+                            font-size: 11px;
+                            color: Theme.text;
+                            wrap: word-wrap;
+                        }
+                    }
+                    // Rust logo — right column, about 2 cm wide ("postage
+                    // stamp" size). Monochrome icon: `colorize` retints it with the
+                    // current text color to stay legible in both light
+                    // and dark theme (Theme.is-dark).
+                    Image {
+                        source: @image-url("../assets/branding/rust_logo.svg");
+                        width: 76px; height: 76px; image-fit: contain;
+                        colorize: Theme.text;
+                    }
+                }
+
+                Rectangle { height: 12px; }
+                Rectangle { height: 1px; background: Theme.surface1; }
+                Rectangle { height: 12px; }
+
+                // ── Made with ─────────────────────────────────────────
+                Text {
+                    text: Tr.about-made-with;
+                    font-size: 11px;
+                    font-italic: true;
+                    color: Theme.subtext0;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle { height: 16px; }
+
+                // ── Close button ──────────────────────────────────────────
+                Rectangle {
+                    height: 34px;
+                    border-radius: 6px;
+                    background: ta-about-close.has-hover
+                        ? Theme.blue.with-alpha(0.82)
+                        : Theme.blue.with-alpha(0.70);
+                    animate background { duration: 100ms; }
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: Tr.btn-close;
+                        color: #ffffff; font-size: 12px; font-weight: 600;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    ta-about-close := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.show-about = false; }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Confirmation modal before closing the application (click on the native close button).
+    if root.show-close-confirm: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: Colors.black.with-alpha(0.55);
+        z: 300;
+
+        // No closing via a click on the background: we just block propagation.
+        TouchArea { }
+
+        // Central card
+        // Height grows to fit the extra warning paragraph shown while a
+        // reference-database (PGN/SCID) or puzzle import is still running
+        // in the background (neither has a cancellation mechanism, see
+        // `db::scid_import`/`reference_import`: quitting now kills the
+        // background thread and loses the not-yet-committed batch of
+        // games — up to COMMIT_EVERY games, decided with the user on
+        // 11/07/2026).
+        Rectangle {
+            width: 360px;
+            height: (root.reference-import-active || root.puzzle-import-active) ? 224px : 176px;
+            animate height { duration: 120ms; }
+            x: (parent.width  - self.width)  / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.base;
+            border-radius: 14px;
+            drop-shadow-blur: 28px;
+            drop-shadow-color: Colors.black.with-alpha(0.45);
+
+            TouchArea { }
+
+            VerticalLayout {
+                padding: 26px;
+                spacing: 16px;
+
+                Text {
+                    text: Tr.app-quit-confirm-title;
+                    font-size: 15px; font-weight: 700;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: Tr.app-quit-confirm-body;
+                    font-size: 12px;
+                    color: Theme.subtext0;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                if root.reference-import-active || root.puzzle-import-active: Text {
+                    text: Tr.app-quit-confirm-import-warning;
+                    font-size: 12px; font-weight: 600;
+                    color: Theme.red;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: ta-close-cancel.has-hover
+                            ? Theme.surface1.with-alpha(0.90)
+                            : Theme.surface1.with-alpha(0.70);
+                        animate background { duration: 100ms; }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.btn-cancel;
+                            color: Theme.text; font-size: 12px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-close-cancel := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.show-close-confirm = false; }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 34px;
+                        border-radius: 6px;
+                        background: ta-close-quit.has-hover
+                            ? Theme.red.with-alpha(0.90)
+                            : Theme.red.with-alpha(0.78);
+                        animate background { duration: 100ms; }
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: Tr.menu-file-quit;
+                            color: #ffffff; font-size: 12px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ta-close-quit := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.quit-app(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// NAG context menu on a move (PHASE 16, Step 6.1) — right-click
+    /// in the history. `context-menu-node-id >= 0` signals a targeted move.
+    if root.context-menu-node-id >= 0: NagContextMenu {
+        x: 0; y: 0; width: root.width; height: root.height;
+        z: 300;
+        move-label: root.context-menu-move-label;
+        is-variation: root.context-menu-is-variation;
+        nag-picked(code) => {
+            root.context-menu-nag-picked(code);
+            root.context-menu-node-id = -1;
+        }
+        promote-picked => {
+            root.context-menu-promote-picked();
+            root.context-menu-node-id = -1;
+        }
+        delete-picked => {
+            root.context-menu-delete-picked();
+            root.context-menu-node-id = -1;
+        }
+        comment-picked => {
+            // Opens the inline editor (Step 6.3) with no Rust round-trip: the
+            // initial field value already comes from `row.white/black-comment`
+            // (already known on the .slint side), only the final confirmation
+            // ("Apply" button/Enter) is sent to Rust.
+            root.editing-comment-node-id = root.context-menu-node-id;
+            root.context-menu-node-id = -1;
+        }
+        closed => { root.context-menu-node-id = -1; }
+    }
+
+    /// Complete Preferences panel (accessible via ⚙ in the header or from the wizard).
+    if root.show-preferences: PreferencesPanel {
+        x: 0; y: 0; width: root.width; height: root.height;
+        engines:              root.saved-engines;
+        hint-engine-path     <=> root.hint-engine-path;
+        hint-engine-name     <=> root.hint-engine-name;
+        book-name-white      <=> root.book-name-white;
+        book-name-black      <=> root.book-name-black;
+        active-node         <=> root.pref-active-node;
+        engine-options      <=> root.engine-options;
+        selected-engine-idx <=> root.selected-engine-idx;
+        current-lang-index:   root.current-lang-index;
+        language-chosen(code) => { root.pref-language-chosen(code); }
+        browse-add-engine    => { root.browse-add-engine(); }
+        remove-engine(idx)   => { root.remove-engine(idx); }
+        reset-prefs          => { root.reset-prefs(); }
+        select-engine(idx)      => { root.query-engine-options(idx); }
+        set-hint-engine(idx)    => { root.set-hint-engine(idx); }
+        browse-book-white       => { root.browse-book-white(); }
+        browse-book-black       => { root.browse-book-black(); }
+        clear-book-white        => { root.clear-book-white(); }
+        clear-book-black        => { root.clear-book-black(); }
+        puzzle-count:              root.puzzle-count;
+        puzzle-stats-text:         root.puzzle-stats-text;
+        puzzle-import-active:      root.puzzle-import-active;
+        puzzle-import-status:      root.puzzle-import-status;
+        import-puzzles           => { root.import-puzzles(); }
+        unload-puzzles           => { root.unload-puzzles(); }
+        reference-pgn-game-count:  root.reference-pgn-game-count;
+        reference-scid-game-count: root.reference-scid-game-count;
+        reference-import-active:   root.reference-import-active;
+        reference-import-status:   root.reference-import-status;
+        reference-import-progress: root.reference-import-progress;
+        import-reference-base    => { root.import-reference-base(); }
+        import-reference-si4-base => { root.import-reference-si4-base(); }
+        clear-reference-base     => { root.clear-reference-base(); }
+        clear-reference-si4-base => { root.clear-reference-si4-base(); }
+        inc-option(name)          => { root.inc-option(name); }
+        dec-option(name)          => { root.dec-option(name); }
+        set-option-value(name, v) => { root.set-option-value(name, v); }
+        toggle-option(name)       => { root.toggle-option(name); }
+        cycle-option(name, fw)    => { root.cycle-option(name, fw); }
+        validate-engine-options   => { root.validate-engine-options(); }
+        reset-engine-options      => { root.reset-engine-options(); }
+        invalid-options-detected <=> root.invalid-options-detected;
+        debug-mode-enabled  <=> root.debug-mode-enabled;
+        toggle-debug-mode(enabled) => { root.toggle-debug-mode(enabled); }
+        close-panel             => {
+            root.pref-active-node    = 0;   // reset to Language for the next opening via ⚙
+            root.selected-engine-idx = -1;  // deselect the engine
+            root.engine-options      = [];  // free the options list
+            root.invalid-options-detected = false;
+            root.show-preferences    = false;
+        }
+    }
+
+    /// Reference game database browser screen (PHASE 82,
+    /// step 7) — opened from the wizard's "Navigation Base" card
+    /// (see `open-navigation-base` above). Same fullscreen overlay
+    /// pattern as `PreferencesPanel` right above.
+    if root.show-reference-browser: ReferenceBrowser {
+        x: 0; y: 0; width: root.width; height: root.height;
+        source              <=> root.reference-browser-source;
+        games:       root.reference-browser-games;
+        total-count: root.reference-browser-total-count;
+        page                <=> root.reference-browser-page;
+        filter-player       <=> root.reference-browser-filter-player;
+        filter-elo-min      <=> root.reference-browser-filter-elo-min;
+        filter-elo-max      <=> root.reference-browser-filter-elo-max;
+        filter-date-from    <=> root.reference-browser-filter-date-from;
+        filter-date-to      <=> root.reference-browser-filter-date-to;
+        filter-eco          <=> root.reference-browser-filter-eco;
+        active-tab        <=> root.reference-browser-active-tab;
+        tree-path-display: root.tree-path-display;
+        tree-candidates:   root.tree-candidates;
+        tree-total-games:  root.tree-total-games;
+        tree-elo-min      <=> root.tree-elo-min;
+        tree-can-go-back:  root.tree-can-go-back;
+        tree-selected-count: root.tree-selected-count;
+        tree-all-checked:    root.tree-all-checked;
+        tree-filter-active:  root.tree-filter-active;
+        tree-filter-label:   root.tree-filter-label;
+        tree-board-squares:      root.tree-board-squares;
+        tree-captured-by-white:  root.tree-captured-by-white;
+        tree-captured-by-black:  root.tree-captured-by-black;
+        tree-material-diff:      root.tree-material-diff;
+        tree-move-chosen(uci) => { root.tree-move-chosen(uci); }
+        tree-go-back        => { root.tree-go-back(); }
+        tree-reset          => { root.tree-reset(); }
+        tree-filter-changed => { root.tree-filter-changed(); }
+        tree-toggle-move(uci) => { root.tree-toggle-move(uci); }
+        tree-toggle-all      => { root.tree-toggle-all(); }
+        tree-list-games      => { root.tree-list-games(); }
+        tree-filter-clear    => { root.tree-filter-clear(); }
+        search-games => {
+            root.reference-browser-page = 0;
+            root.search-reference-games();
+        }
+        go-to-page(p) => {
+            root.reference-browser-page = p;
+            root.search-reference-games();
+        }
+        reset-filters => {
+            root.reference-browser-filter-player      = "";
+            root.reference-browser-filter-elo-min     = "";
+            root.reference-browser-filter-elo-max     = "";
+            root.reference-browser-filter-date-from   = "";
+            root.reference-browser-filter-date-to     = "";
+            root.reference-browser-filter-eco         = "";
+            root.reference-browser-page = 0;
+            root.search-reference-games();
+        }
+        source-changed => {
+            // Follow-up 11/07/2026: PGN/SCID switch (`root.reference-browser-
+            // source` already updated by the two-way `<=>` binding
+            // above, BEFORE this callback fires). Refreshes
+            // BOTH tabs from the new source — same reset
+            // logic as `open-navigation-base`: a filter/selection draft
+            // from the old source would make no sense on
+            // the new one.
+            root.reference-browser-page          = 0;
+            root.reference-browser-filter-player  = "";
+            root.reference-browser-filter-elo-min = "";
+            root.reference-browser-filter-elo-max = "";
+            root.reference-browser-filter-date-from = "";
+            root.reference-browser-filter-date-to   = "";
+            root.reference-browser-filter-eco       = "";
+            root.reference-browser-active-tab = 0;
+            root.tree-filter-clear();
+            root.search-reference-games();
+            root.tree-elo-min = "";
+            root.tree-reset();
+        }
+        game-selected(id) => {
+            // PHASE 82, step 9: opens the detail screen (on-demand
+            // evaluation curve). "Replay from a move" — step
+            // 17 — still needs to be built separately (dedicated button to add
+            // in `GameDetailView` when the time comes).
+            root.open-game-detail(id);
+        }
+        close-panel => {
+            root.show-reference-browser = false;
+            // Closing without having chosen a move: flag hygiene, so
+            // that a later reopening from "Navigation Base" isn't
+            // mistaken for an opening from the wizard.
+            root.reference-browser-from-wizard = false;
+        }
+    }
+
+    /// Detail of a reference database game — on-demand evaluation
+    /// curve (PHASE 82, step 9). Opened from a row in the game
+    /// list (`game-selected` above). Same fullscreen overlay
+    /// pattern as `ReferenceBrowser`/`PreferencesPanel`.
+    if root.show-game-detail: GameDetailView {
+        x: 0; y: 0; width: root.width; height: root.height;
+        header:          root.game-detail-header;
+        moves:           root.game-detail-moves;
+        scores:          root.game-detail-scores;
+        white-curve:     root.game-detail-white-curve;
+        black-curve:     root.game-detail-black-curve;
+        analysis-active: root.game-detail-analysis-active;
+        analysis-status: root.game-detail-analysis-status;
+        can-deepen:      root.game-detail-can-deepen;
+        board-squares:   root.game-detail-board-squares;
+        current-ply:     root.game-detail-current-ply;
+        total-plies:     root.game-detail-total-plies;
+        from-wizard-picker: root.reference-browser-from-wizard;
+        analyze-quick => { root.analyze-game-detail(400); }
+        analyze-deep  => { root.analyze-game-detail(1500); }
+        ply-selected(ply) => { root.game-detail-ply-selected(ply); }
+        start-from-here(ply) => { root.game-detail-start-from-here(ply); }
+        copy-fen         => { root.game-detail-copy-fen(); }
+        export-pgn       => { root.game-detail-export-pgn(); }
+        export-board-png(flipped) => { root.game-detail-export-board-png(flipped); }
+        close-panel   => { root.show-game-detail = false; }
+    }
+
+    /// "Book move played" notification (PHASE 15) — above everything
+    /// else, centered at the top of the window. Blocks no clicks (no
+    /// TouchArea).
+    BookToast {
+        x: (root.width - self.width) / 2;
+        y: 12px;
+        notif-text: root.book-notification-text;
+        notif-seq:  root.book-notification-seq;
+    }
+
+    /// "Correct/incorrect move" notification in Puzzle mode (PHASE 14,
+    /// Step 6) — offset below `BookToast` as a precaution (never active at
+    /// the same time in practice: books are disabled in Puzzle mode).
+    PuzzleToast {
+        x: (root.width - self.width) / 2;
+        y: 52px;
+        notif-text: root.puzzle-feedback-text;
+        notif-seq:  root.puzzle-feedback-seq;
+        positive:   root.puzzle-feedback-positive;
+    }
+}

@@ -1,0 +1,628 @@
+// ui/game_detail.slint — Detail of a game from the reference database
+// (PHASE 82, step 9: evaluation curve on demand; step 10:
+// replay from a move; ergonomics bugfix 09/07/2026: preview board +
+// navigation).
+//
+// Opened by clicking a row in the game list ("Games" tab of
+// `reference_browser.slint`, `game-selected(id)` callback). Shows
+// the game header, the moves (SAN, clickable) and the evaluation
+// curve computed ON DEMAND (never automatically on opening
+// — decision made in discussion, PHASE 82, point 6) via the engine already
+// configured by the user (no separate engine setting), reusing
+// the `ScoreGraph` component already used for the current game.
+//
+// "Quick analysis first, optional deepening" (same decision):
+// the "Analyze" button launches a quick pass (see `main.rs`, short
+// movetime); once finished, a "Deepen" button appears to rerun
+// the same analysis with a longer thinking time.
+//
+// ── Ergonomics bugfix 09/07/2026 (user feedback, 3 related points) ──────
+// 1. Preview board (NOT interactive — plain visualization, never
+//    meant to be played on) showing the position of the selected move, or the
+//    end-of-game position if no move is selected. Size
+//    ≈30% of the main board (`board.slint::ChessBoard`, reused
+//    as-is, without wiring up `square-clicked`).
+// 2. Move-by-move navigation with DVD-player/VCR-style
+//    controls ("<<" "<" ">" ">>"): go to start, previous move, next
+//    move, go to end.
+// 3. Clicking a move in the list (or navigating) ONLY updates
+//    the preview (`ply-selected`) — NEVER directly starts a game
+//    (source of confusion, explicit user feedback). The
+//    "Start from this position" button (`start-from-here`) only appears
+//    if this screen was opened from the wizard's 3rd button
+//    ("From the game database", see `from-wizard-picker` /
+//    `reference-browser-from-wizard` in `app.slint`) — never from a
+//    plain browsing access ("Browse Database", wizard step 0).
+
+import { Theme } from "theme.slint";
+import { Tr }    from "translations.slint";
+import { ScoreGraph, ScoreBar } from "score_graph.slint";
+import { ChessBoard, SquareData } from "board.slint";
+import { TooltipIconButton } from "tooltip_icon_button.slint";
+import { MoveCell } from "move_list.slint";
+
+/// A pair of moves (White/Black) shown in the move feed
+/// (PHASE 82, step 10). `white-ply`/`black-ply` are the 1-based indices
+/// within the full game (see `core::game::GameState::position_at`,
+/// `index` = position AFTER the `index`-th move) — passed as-is to
+/// `ply-selected` to retrieve the exact position on the Rust side.
+/// `black-ply == -1`: game ended on a White move (odd
+/// last index), no Black move to display for this pair.
+export struct GameDetailMoveRow {
+    number-str: string,
+    white-san:  string,
+    black-san:  string,
+    white-ply:  int,
+    black-ply:  int,
+    // Ergonomics follow-up 10/07/2026: same per-category syntax
+    // highlighting as the main history panel (see
+    // `GameController::move_kind_code`, identical values: 0 = normal ·
+    // 1 = capture · 2 = castling · 3 = promotion · 4 = check · 5 = checkmate).
+    white-move-kind: int,
+    black-move-kind: int,
+    // Text comment attached to the move (PGN `{...}` import or SCID
+    // V2 Phase B decoding, 12/07/2026) — shown READ-ONLY (unlike
+    // `MoveRow.white-comment`/`black-comment` in the main history
+    // panel, which are editable): an imported reference game is not
+    // editable from this screen. Empty string = no comment.
+    white-comment: string,
+    black-comment: string,
+}
+
+export component GameDetailView inherits Rectangle {
+    in property <string> header:      "";
+    in property <[GameDetailMoveRow]> moves: [];
+    in property <[ScoreBar]> scores:  [];
+    in property <string> white-curve: "";
+    in property <string> black-curve: "";
+    in property <bool>   analysis-active: false;
+    in property <string> analysis-status: "";
+    in property <bool>   can-deepen: false;
+
+    // ── Preview board + navigation (ergonomics bugfix 09/07/2026) ─────
+    /// Board for the currently previewed position (`current-ply`),
+    /// computed on the Rust side via `game_controller::build_static_squares` — a
+    /// STATIC board, with no selection or legal moves (see doc at the top of the
+    /// file). Updated by Rust in response to `ply-selected`.
+    in property <[SquareData]> board-squares: [];
+    /// Currently previewed half-move (0 = starting position, N =
+    /// position after the N-th half-move). Rust initializes it to
+    /// `total-plies` (end-of-game position) when the screen opens.
+    in property <int> current-ply:  0;
+    in property <int> total-plies:  0;
+    /// `true` if this screen was opened from the wizard's 3rd button
+    /// ("From the game database…", see `game_setup.slint` /
+    /// `app.slint::open-reference-browser-wizard`) — the only case where
+    /// "Start from this position" should appear. `false`
+    /// from a plain browsing access ("Browse Database").
+    in property <bool> from-wizard-picker: false;
+
+    /// Orientation of the mini-board (ergonomics follow-up 10/07/2026). Purely
+    /// visual and private to this component (never propagated up to `AppWindow`,
+    /// unlike `board-flipped` of the main window) — recomputing
+    /// `board-squares` isn't necessary, `ChessBoard.flipped` only flips
+    /// the on-screen position (see `board.slint`). Reset to
+    /// `false` each time the screen is reopened (the component is recreated on
+    /// every toggle of `show-game-detail`, see `app.slint` doc).
+    property <bool> board-flipped: false;
+
+    /// Asks Rust to recompute the preview for this half-move — NEVER
+    /// starts a game (see doc at the top of the file).
+    callback ply-selected(int);
+    /// Only wired when `from-wizard-picker` is true: returns the
+    /// position of the previewed half-move to the already-open "New Game"
+    /// wizard (preserving the already-chosen mode), never recreating
+    /// the wizard — see `main.rs::on_game_detail_start_from_here`.
+    callback start-from-here(int);
+
+    // ── 4 buttons "identical" to the main window (ergonomics follow-up
+    // 10/07/2026) — act on the previewed position (`current-ply`),
+    // not on a game that might be in progress.
+    /// Copies the FEN of the previewed position to the clipboard.
+    callback copy-fen();
+    /// Saves the PGN (text already stored in the database) of the displayed game.
+    callback export-pgn();
+    /// Saves a PNG image of the previewed board. Argument =
+    /// current `board-flipped` (passed explicitly: this property is
+    /// private to this component, Rust cannot read it otherwise).
+    callback export-board-png(bool);
+
+    callback analyze-quick();  // Rust: quick pass (short movetime)
+    callback analyze-deep();   // Rust: re-analyzes the same game, longer movetime
+    callback close-panel;
+
+    background: Theme.crust.with-alpha(0.85);
+    ta-bg := TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.close-panel(); }
+    }
+
+    // ── Main card 620 × 792 ────────────────────────────────────────
+    // Grown in height (560 → 620 → 720 → 760 → 792) for the preview
+    // board + navigation + the 4 buttons + the "Start from this
+    // position" button, but SHRUNK in width (820 → 620,
+    // ergonomics bugfix 09/07/2026, user feedback: the move list
+    // took up the card's entire width for content that didn't need
+    // it) — the move list is now a stretched column
+    // (horizontal-stretch) filling all remaining space to the right of
+    // the board, rather than a fixed width.
+    // Follow-up 10/07/2026 (1): board enlarged by 50% (180px → 270px), so
+    // the card gains 100px of height (620 → 720).
+    // Follow-up 10/07/2026 (2): added the row of 4 PNG/FEN/Flip/
+    // PGN buttons below the navigation (board column: +32px of button + 8px
+    // of spacing = +40px), so the card gains another 40px (720 → 760).
+    // Follow-up 10/07/2026 (3): added the selected-move info block
+    // (score/quality/depth/best move) below the evaluation curve
+    // (+22px of row + 10px of spacing = +32px), so the card gains
+    // another 32px (760 → 792).
+    Rectangle {
+        width: 620px; height: 792px;
+        x: (parent.width  - self.width)  / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.base;
+        border-radius: 14px;
+        drop-shadow-blur:     40px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+
+        ta-card := TouchArea { width: parent.width; height: parent.height; }
+
+        VerticalLayout {
+
+            // ── Header ────────────────────────────────────────────────
+            Rectangle {
+                height: 50px;
+                background: Theme.crust;
+
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 12px;
+
+                    Text {
+                        text: "📈  " + Tr.gamedetail-title;
+                        color: Theme.text; font-size: 14px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Rectangle {
+                        width: 30px; height: 30px; border-radius: 6px;
+                        background: ta-x.has-hover ? Theme.hover : transparent;
+                        animate background { duration: 100ms; }
+
+                        Path {
+                            width: 12px; height: 12px;
+                            x: (parent.width  - self.width)  / 2;
+                            y: (parent.height - self.height) / 2;
+                            commands: "M1 1 L9 9 M9 1 L1 9";
+                            viewbox-x: 0; viewbox-y: 0; viewbox-width: 10; viewbox-height: 10;
+                            stroke: Theme.overlay0;
+                            stroke-width: 1.4px;
+                        }
+                        ta-x := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.close-panel(); }
+                        }
+                    }
+                }
+            }
+
+            // ── Body ──────────────────────────────────────────────────
+            VerticalLayout {
+                padding: 16px; spacing: 10px;
+                vertical-stretch: 1;
+
+                Text {
+                    text: root.header;
+                    color: Theme.text; font-size: 12px; font-weight: 700;
+                    wrap: word-wrap;
+                }
+
+                // ── Preview board + move list, side by side ────
+                HorizontalLayout {
+                    spacing: 14px;
+
+                    // Board column (≈30% of a main board, enlarged
+                    // by 50% on 10/07/2026: 180px → 270px) + navigation
+                    VerticalLayout {
+                        width: 270px;
+                        spacing: 8px;
+
+                        ChessBoard {
+                            width: 270px; height: 270px;
+                            squares: root.board-squares;
+                            show-coordinates: false;
+                            flipped: root.board-flipped;
+                            // Deliberately NOT wired up: a preview, never played
+                            // on (see doc at the top of the file).
+                        }
+
+                        // DVD-player/VCR-style navigation — the 4
+                        // buttons stretch (horizontal-stretch) to fill
+                        // the full width of the board above (270px).
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            nav-start := Rectangle {
+                                horizontal-stretch: 1; height: 26px; border-radius: 5px;
+                                background: ta-nav-start.has-hover && root.current-ply > 0 ? Theme.hover : Theme.surface1;
+                                Text {
+                                    text: "<<";
+                                    color: root.current-ply > 0 ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
+                                }
+                                ta-nav-start := TouchArea {
+                                    mouse-cursor: root.current-ply > 0 ? pointer : default;
+                                    clicked => { if (root.current-ply > 0) { root.ply-selected(0); } }
+                                }
+                            }
+                            nav-prev := Rectangle {
+                                horizontal-stretch: 1; height: 26px; border-radius: 5px;
+                                background: ta-nav-prev.has-hover && root.current-ply > 0 ? Theme.hover : Theme.surface1;
+                                Text {
+                                    text: "<";
+                                    color: root.current-ply > 0 ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
+                                }
+                                ta-nav-prev := TouchArea {
+                                    mouse-cursor: root.current-ply > 0 ? pointer : default;
+                                    clicked => { if (root.current-ply > 0) { root.ply-selected(root.current-ply - 1); } }
+                                }
+                            }
+                            nav-next := Rectangle {
+                                horizontal-stretch: 1; height: 26px; border-radius: 5px;
+                                background: ta-nav-next.has-hover && root.current-ply < root.total-plies ? Theme.hover : Theme.surface1;
+                                Text {
+                                    text: ">";
+                                    color: root.current-ply < root.total-plies ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
+                                }
+                                ta-nav-next := TouchArea {
+                                    mouse-cursor: root.current-ply < root.total-plies ? pointer : default;
+                                    clicked => { if (root.current-ply < root.total-plies) { root.ply-selected(root.current-ply + 1); } }
+                                }
+                            }
+                            nav-end := Rectangle {
+                                horizontal-stretch: 1; height: 26px; border-radius: 5px;
+                                background: ta-nav-end.has-hover && root.current-ply < root.total-plies ? Theme.hover : Theme.surface1;
+                                Text {
+                                    text: ">>";
+                                    color: root.current-ply < root.total-plies ? Theme.text : Theme.overlay0;
+                                    font-size: 11px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
+                                }
+                                ta-nav-end := TouchArea {
+                                    mouse-cursor: root.current-ply < root.total-plies ? pointer : default;
+                                    clicked => { if (root.current-ply < root.total-plies) { root.ply-selected(root.total-plies); } }
+                                }
+                            }
+                        }
+
+                        // 4 buttons "identical (same principle)" to those in the
+                        // main window (ergonomics follow-up 10/07/2026) —
+                        // act on the previewed position, not on a
+                        // game that might be in progress. Centered below the board
+                        // (270px) via the two side spacers.
+                        HorizontalLayout {
+                            height: 32px;
+                            spacing: 6px;
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            TooltipIconButton {
+                                height: 32px;
+                                icon-text: "📸"; icon-size: 15px;
+                                tooltip-text: Tr.tooltip-export-board-png;
+                                clicked => { root.export-board-png(root.board-flipped); }
+                            }
+                            TooltipIconButton {
+                                height: 32px;
+                                icon-text: "📋"; icon-size: 13px;
+                                tooltip-text: Tr.tooltip-copy-fen;
+                                clicked => { root.copy-fen(); }
+                            }
+
+                            // Flip — purely visual, handled locally
+                            // (see `board-flipped` doc above), same
+                            // vector icon as the main window.
+                            Rectangle {
+                                width: 32px; height: 32px;
+                                border-radius: 4px;
+                                background: ta-detail-flip.has-hover ? Theme.hover : Theme.surface0;
+
+                                Path {
+                                    x: 6px; y: 9px;
+                                    width: 20px; height: 14px;
+                                    viewbox-width: 20; viewbox-height: 14;
+                                    fill: Colors.transparent;
+                                    stroke: root.board-flipped ? Theme.blue : Theme.text;
+                                    stroke-width: 1.8px;
+                                    commands: "M 1 3.5 L 16 3.5 M 12 1 L 16 3.5 L 12 6 M 19 10.5 L 4 10.5 M 8 8 L 4 10.5 L 8 13";
+                                }
+
+                                if ta-detail-flip.has-hover: Rectangle {
+                                    x: (parent.width - self.width) / 2;
+                                    y: parent.height + 5px;
+                                    width: tip-detail-flip.preferred-width + 16px;
+                                    height: 22px;
+                                    background: Theme.surface1;
+                                    border-radius: 4px;
+                                    drop-shadow-blur: 4px;
+                                    drop-shadow-color: Theme.shadow;
+                                    z: 200;
+                                    tip-detail-flip := Text {
+                                        width: parent.width; height: parent.height;
+                                        text: Tr.tooltip-flip-board;
+                                        color: Theme.text; font-size: 11px;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                }
+
+                                ta-detail-flip := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.board-flipped = !root.board-flipped; }
+                                }
+                            }
+
+                            TooltipIconButton {
+                                height: 32px;
+                                icon-text: "💾"; icon-size: 15px;
+                                tooltip-text: Tr.tooltip-export-pgn;
+                                clicked => { root.export-pgn(); }
+                            }
+
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+
+                    // Move list column — stretched (follow-up 10/07/2026:
+                    // fills all remaining space to the right of the board,
+                    // instead of a fixed width as in the 09/07/2026 bugfix).
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+
+                        Text {
+                            text: Tr.gamedetail-moves-label;
+                            color: Theme.overlay0; font-size: 10px; font-weight: 700;
+                        }
+
+                        // Clickable moves (SAN), one White/Black pair per
+                        // row — clicking a move only updates
+                        // the preview (`ply-selected`), never starts a
+                        // game (see doc at the top of the file). `Flickable`
+                        // + `VerticalLayout.preferred-height` pattern,
+                        // already proven in `preferences.slint`.
+                        Rectangle {
+                            height: 326px;
+                            background: Theme.mantle;
+                            border-radius: 6px;
+                            clip: true;
+
+                            Flickable {
+                                x: 8px; y: 8px;
+                                width: parent.width - 16px; height: parent.height - 16px;
+                                interactive: true;
+                                viewport-height: moves-vl.preferred-height;
+
+                                moves-vl := VerticalLayout {
+                                    width: parent.width;
+                                    alignment: start;
+
+                                    // Per-category syntax highlighting identical
+                                    // to the main history panel (ergonomics follow-up
+                                    // 10/07/2026): direct reuse of `MoveCell`
+                                    // (`move_list.slint`), rather than a separate
+                                    // reimplementation — guaranteed to stay identical over time.
+                                    for pair in root.moves: VerticalLayout {
+                                        HorizontalLayout {
+                                            height: 24px;
+                                            spacing: 6px;
+
+                                            Text {
+                                                text: pair.number-str;
+                                                width: 26px;
+                                                color: Theme.overlay0; font-size: 11px;
+                                                vertical-alignment: center;
+                                            }
+                                            MoveCell {
+                                                horizontal-stretch: 1;
+                                                san:       pair.white-san;
+                                                active:    pair.white-ply == root.current-ply;
+                                                move-kind: pair.white-move-kind;
+                                                clicked => { root.ply-selected(pair.white-ply); }
+                                            }
+                                            if pair.black-ply != -1: MoveCell {
+                                                horizontal-stretch: 1;
+                                                san:       pair.black-san;
+                                                active:    pair.black-ply == root.current-ply;
+                                                move-kind: pair.black-move-kind;
+                                                clicked => { root.ply-selected(pair.black-ply); }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+
+                                        // ── Comments (read-only) ──────────────
+                                        // Same visual family as the main history
+                                        // panel (`move_list.slint`, display-only):
+                                        // italic, indented, no tinted background — but
+                                        // never editable here (see doc of
+                                        // `GameDetailMoveRow.white-comment`).
+                                        if pair.white-comment != "": Text {
+                                            x: 32px;
+                                            width: parent.width - 36px; height: 18px;
+                                            text: pair.white-comment;
+                                            color: Theme.overlay0;
+                                            font-size: 10px;
+                                            font-italic: true;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        if pair.black-comment != "": Text {
+                                            x: 32px;
+                                            width: parent.width - 36px; height: 18px;
+                                            text: pair.black-comment;
+                                            color: Theme.overlay0;
+                                            font-size: 10px;
+                                            font-italic: true;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── "Start from this position" ───────────────
+                // Only from the wizard's 3rd button (see doc at the
+                // top of the file) — never from a simple click on a
+                // move, and never from the plain browsing access.
+                if root.from-wizard-picker: Rectangle {
+                    height: 32px; border-radius: 6px;
+                    background: ta-start-here.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue;
+                    animate background { duration: 80ms; }
+                    Text {
+                        text: Tr.gamedetail-start-from-here;
+                        color: Theme.base; font-size: 11px; font-weight: 700;
+                        horizontal-alignment: center; vertical-alignment: center;
+                        width: parent.width; height: parent.height;
+                    }
+                    ta-start-here := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.start-from-here(root.current-ply); }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Theme.surface0; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: Tr.gamedetail-eval-label;
+                        color: Theme.overlay0; font-size: 10px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+
+                    if !root.analysis-active: Rectangle {
+                        width: 140px; height: 26px; border-radius: 5px;
+                        background: ta-analyze.has-hover ? Theme.blue.with-alpha(0.82) : Theme.blue;
+                        Text {
+                            text: Tr.gamedetail-analyze-button;
+                            color: Theme.base; font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        ta-analyze := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.analyze-quick(); }
+                        }
+                    }
+                    if !root.analysis-active && root.can-deepen: Rectangle {
+                        width: 110px; height: 26px; border-radius: 5px;
+                        background: ta-deepen.has-hover ? Theme.hover : Theme.surface1;
+                        Text {
+                            text: Tr.gamedetail-deepen-button;
+                            color: Theme.text; font-size: 10px; font-weight: 600;
+                            horizontal-alignment: center; vertical-alignment: center;
+                            width: parent.width; height: parent.height;
+                        }
+                        ta-deepen := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.analyze-deep(); }
+                        }
+                    }
+                }
+
+                if root.analysis-active: Text {
+                    text: root.analysis-status;
+                    color: Theme.blue; font-size: 10px;
+                }
+                if !root.analysis-active && root.analysis-status != "": Text {
+                    // Persistent error message (e.g. no engine configured) —
+                    // stays displayed as long as no analysis has started.
+                    text: root.analysis-status;
+                    color: Theme.red; font-size: 10px;
+                }
+
+                if root.scores.length == 0 && !root.analysis-active: Rectangle {
+                    height: 140px;
+                    Text {
+                        text: Tr.gamedetail-not-analyzed;
+                        color: Theme.overlay0; font-size: 11px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                        width: parent.width; height: parent.height;
+                        wrap: word-wrap;
+                    }
+                }
+                if root.scores.length > 0: ScoreGraph {
+                    height: 140px;
+                    scores: root.scores;
+                    // Ergonomics follow-up 10/07/2026: blue vertical cursor on
+                    // the previewed move — the feature already existed
+                    // in `ScoreGraph` (reused as-is from the
+                    // main board), it just was never wired up here.
+                    current-ply: root.current-ply;
+                    white-commands: root.white-curve;
+                    black-commands: root.black-curve;
+                }
+
+                // ── Selected-move info block (ergonomics follow-up
+                // 10/07/2026): score, move quality, depth reached +
+                // origin of the pass, suggested best move — for the
+                // currently previewed position (`current-ply`).
+                if root.scores.length > 0
+                   && root.current-ply >= 0
+                   && root.current-ply < root.scores.length: info-row := HorizontalLayout {
+                    height: 22px;
+                    spacing: 12px;
+
+                    property <ScoreBar> info: root.scores[root.current-ply];
+
+                    Text {
+                        text: Tr.gamedetail-score-label + " " + info-row.info.score-display;
+                        color: Theme.text; font-size: 10px; font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if info-row.info.move-quality >= 0: Text {
+                        text: info-row.info.move-quality == 0 ? Tr.gamedetail-quality-excellent :
+                              info-row.info.move-quality == 1 ? Tr.gamedetail-quality-good :
+                              info-row.info.move-quality == 2 ? Tr.gamedetail-quality-inaccuracy :
+                              info-row.info.move-quality == 3 ? Tr.gamedetail-quality-mistake :
+                              Tr.gamedetail-quality-blunder;
+                        color: info-row.info.move-quality == 0 ? Theme.green :
+                               info-row.info.move-quality == 1 ? Theme.text :
+                               info-row.info.move-quality == 2 ? Theme.yellow :
+                               info-row.info.move-quality == 3 ? Theme.peach :
+                               Theme.red;
+                        font-size: 10px; font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if info-row.info.depth > 0: Text {
+                        text: Tr.gamedetail-depth-label + " " + info-row.info.depth
+                            + " (" + (info-row.info.from-deep-pass ? Tr.gamedetail-pass-deep : Tr.gamedetail-pass-quick) + ")";
+                        color: Theme.overlay0; font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if info-row.info.best-move-san != "": Text {
+                        text: Tr.gamedetail-best-move-label + " " + info-row.info.best-move-san;
+                        color: Theme.subtext0; font-size: 10px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

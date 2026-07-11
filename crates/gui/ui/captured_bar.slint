@@ -1,0 +1,100 @@
+// Bar of captured pieces, displayed above and below the board
+// (Phase 19 — capture visualization + material differential).
+//
+// One instance per side: `pieces` = trophies of THIS side (opponent pieces
+// it has captured), already sorted by descending value and compacted on the
+// Rust side (icon + counter for duplicates, see GameController::captured_summary).
+// `material-diff` is only shown on the side that has the advantage (value > 0).
+
+import { Theme } from "theme.slint";
+
+export struct CapturedPieceData {
+    piece-code: string,  // 2-char ASCII identifier, e.g. "bP" — see board.slint
+    count:      int,
+}
+
+export component CapturedPiecesBar inherits Rectangle {
+    in property <[CapturedPieceData]> pieces;
+    /// Only shown if > 0 (this side has a material advantage).
+    in property <int> material-diff: 0;
+
+    height: 26px;
+    background: transparent;
+
+    // ── Pre-loaded SVG images (same files as board.slint) ─────────────
+    property <image> img-wK: @image-url("../assets/pieces/wK.svg");
+    property <image> img-wQ: @image-url("../assets/pieces/wQ.svg");
+    property <image> img-wR: @image-url("../assets/pieces/wR.svg");
+    property <image> img-wB: @image-url("../assets/pieces/wB.svg");
+    property <image> img-wN: @image-url("../assets/pieces/wN.svg");
+    property <image> img-wP: @image-url("../assets/pieces/wP.svg");
+    property <image> img-bK: @image-url("../assets/pieces/bK.svg");
+    property <image> img-bQ: @image-url("../assets/pieces/bQ.svg");
+    property <image> img-bR: @image-url("../assets/pieces/bR.svg");
+    property <image> img-bB: @image-url("../assets/pieces/bB.svg");
+    property <image> img-bN: @image-url("../assets/pieces/bN.svg");
+    property <image> img-bP: @image-url("../assets/pieces/bP.svg");
+
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        spacing: 3px;
+        alignment: start;
+
+        for p in root.pieces: Rectangle {
+            width:  22px;
+            height: 22px;
+
+            property <image> piece-img:
+                p.piece-code == "wK" ? root.img-wK :
+                p.piece-code == "wQ" ? root.img-wQ :
+                p.piece-code == "wR" ? root.img-wR :
+                p.piece-code == "wB" ? root.img-wB :
+                p.piece-code == "wN" ? root.img-wN :
+                p.piece-code == "wP" ? root.img-wP :
+                p.piece-code == "bK" ? root.img-bK :
+                p.piece-code == "bQ" ? root.img-bQ :
+                p.piece-code == "bR" ? root.img-bR :
+                p.piece-code == "bB" ? root.img-bB :
+                p.piece-code == "bN" ? root.img-bN :
+                root.img-bP; // fallback value (bP)
+
+            Image {
+                source: piece-img;
+                width:  parent.width  * 0.85;
+                height: parent.height * 0.85;
+                x: 0; y: 0;
+                image-fit: contain;
+            }
+
+            // ── Counter badge (duplicates) ─────────────────────────────────
+            if p.count > 1: Rectangle {
+                width:  13px;
+                height: 13px;
+                border-radius: 6.5px;
+                background: Theme.surface1;
+                x: parent.width  - self.width  + 2px;
+                y: parent.height - self.height + 2px;
+
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: p.count;
+                    font-size:   8px;
+                    font-weight: 700;
+                    color:       Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment:   center;
+                }
+            }
+        }
+
+        // ── Material differential (only appears on the side with the advantage) ──
+        if root.material-diff > 0: Text {
+            text: "+" + root.material-diff;
+            color:       Theme.blue;
+            font-size:   12px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+}

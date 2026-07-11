@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Vendetta Chess
+Comment=Interface graphique d'échecs de niveau professionnel
+Comment[fr]=Interface graphique d'échecs de niveau professionnel
+Exec=/opt/vendetta-chess/vendetta-chess-gui
+Icon=vendetta-chess
+Terminal=false
+Categories=Game;BoardGame;
+StartupWMClass=vendetta-chess-gui

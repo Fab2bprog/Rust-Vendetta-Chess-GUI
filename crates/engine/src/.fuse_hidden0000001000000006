@@ -1,0 +1,234 @@
+//! Référence typée à un moteur dans le [`EnginePool`](crate::pool::EnginePool).
+//!
+//! Un [`EngineHandle`] est retourné par [`EnginePool::add`] lors de la
+//! connexion d'un moteur. Il représente un "ticket" léger qui peut être
+//! conservé, cloné ou transmis sans emprunter le pool.
+//!
+//! Il permet de :
+//! - retrouver un moteur dans le pool (`pool.get(handle.id())`)
+//! - vérifier qu'il est encore actif (`handle.is_alive(&pool)`)
+//! - inspecter ses métadonnées (nom, chemin, options)
+
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use crate::{config::EngineConfig, pool::EnginePool};
+
+// ---------------------------------------------------------------------------
+// EngineHandle
+// ---------------------------------------------------------------------------
+
+/// Référence légère à un moteur enregistré dans le pool.
+///
+/// Créé par [`EnginePool::add`] ; peut être cloné et transmis librement.
+/// Ne détient pas le moteur lui-même — il faut passer par le pool pour
+/// toute opération d'analyse.
+#[derive(Debug, Clone)]
+pub struct EngineHandle {
+    /// Identifiant unique dans le pool.
+    id:           String,
+    /// Nom affiché (extrait de la config).
+    name:         String,
+    /// Chemin du binaire (extrait de la config).
+    path:         PathBuf,
+    /// Nombre d'options UCI configurées.
+    option_count: usize,
+    /// Instant où le moteur a été ajouté au pool.
+    created_at:   Instant,
+}
+
+impl EngineHandle {
+    /// Crée un handle à partir de l'identifiant et de la config utilisés
+    /// lors de l'appel à [`EnginePool::add`].
+    #[must_use]
+    pub(crate) fn new(id: String, config: &EngineConfig) -> Self {
+        Self {
+            id,
+            name:         config.name.clone(),
+            path:         config.path.clone(),
+            option_count: config.options.len(),
+            created_at:   Instant::now(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Accesseurs
+    // -----------------------------------------------------------------------
+
+    /// Identifiant du moteur dans le pool.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Nom affiché du moteur.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Chemin du binaire.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Nombre d'options UCI transmises au moteur lors de l'initialisation.
+    #[must_use]
+    pub fn option_count(&self) -> usize {
+        self.option_count
+    }
+
+    /// Durée écoulée depuis l'ajout du moteur au pool.
+    #[must_use]
+    pub fn age(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    // -----------------------------------------------------------------------
+    // Statut
+    // -----------------------------------------------------------------------
+
+    /// Retourne `true` si le moteur référencé est encore actif dans le pool.
+    ///
+    /// Un handle reste valide tant que `pool.remove(id)` n'a pas été appelé.
+    #[must_use]
+    pub fn is_alive(&self, pool: &EnginePool) -> bool {
+        pool.contains(&self.id)
+    }
+}
+
+impl std::fmt::Display for EngineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EngineHandle {{ id: '{}', name: '{}' }}", self.id, self.name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn vendetta_path() -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("../../engines/vendetta_chess_motor");
+        p
+    }
+
+    fn vendetta_config(name: &str) -> EngineConfig {
+        EngineConfig::new(name, vendetta_path())
+    }
+
+    fn make_handle(id: &str, name: &str) -> EngineHandle {
+        let cfg = EngineConfig::new(name, "/tmp/fake");
+        EngineHandle::new(id.to_string(), &cfg)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests sans moteur réel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handle_id() {
+        let h = make_handle("v1", "Vendetta");
+        assert_eq!(h.id(), "v1");
+    }
+
+    #[test]
+    fn test_handle_name() {
+        let h = make_handle("v1", "Vendetta");
+        assert_eq!(h.name(), "Vendetta");
+    }
+
+    #[test]
+    fn test_handle_path() {
+        let cfg = EngineConfig::new("Test", "/tmp/myengine");
+        let h = EngineHandle::new("t1".to_string(), &cfg);
+        assert_eq!(h.path(), Path::new("/tmp/myengine"));
+    }
+
+    #[test]
+    fn test_handle_option_count_zero() {
+        let h = make_handle("v1", "Vendetta");
+        assert_eq!(h.option_count(), 0);
+    }
+
+    #[test]
+    fn test_handle_option_count_nonzero() {
+        let cfg = EngineConfig::builder("Test", "/tmp/fake")
+            .option("Hash", "128")
+            .option("Threads", "2")
+            .build();
+        let h = EngineHandle::new("t1".to_string(), &cfg);
+        assert_eq!(h.option_count(), 2);
+    }
+
+    #[test]
+    fn test_handle_age_nonnegative() {
+        let h = make_handle("v1", "Vendetta");
+        assert!(h.age() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_handle_clone() {
+        let h = make_handle("v1", "Vendetta");
+        let h2 = h.clone();
+        assert_eq!(h.id(), h2.id());
+        assert_eq!(h.name(), h2.name());
+    }
+
+    #[test]
+    fn test_handle_display() {
+        let h = make_handle("v1", "Vendetta");
+        let s = h.to_string();
+        assert!(s.contains("v1"));
+        assert!(s.contains("Vendetta"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests avec moteur réel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_alive_true() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        let handle = pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        assert!(handle.is_alive(&pool));
+    }
+
+    #[test]
+    fn test_is_alive_false_after_remove() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        let handle = pool.add("v1", vendetta_config("Vendetta")).unwrap();
+        pool.remove("v1").unwrap();
+        assert!(!handle.is_alive(&pool));
+    }
+
+    #[test]
+    fn test_is_alive_false_after_quit_all() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        let h1 = pool.add("v1", vendetta_config("V1")).unwrap();
+        let h2 = pool.add("v2", vendetta_config("V2")).unwrap();
+        pool.quit_all();
+        assert!(!h1.is_alive(&pool));
+        assert!(!h2.is_alive(&pool));
+    }
+
+    #[test]
+    fn test_handle_from_add_has_correct_id() {
+        if !vendetta_path().exists() { return; }
+        let mut pool = EnginePool::new();
+        let handle = pool.add("motor", vendetta_config("Vendetta")).unwrap();
+        assert_eq!(handle.id(), "motor");
+        assert_eq!(handle.name(), "Vendetta");
+    }
+}

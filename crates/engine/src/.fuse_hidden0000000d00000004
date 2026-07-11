@@ -1,0 +1,567 @@
+//! Comparaison parallèle de plusieurs moteurs UCI sur la même position.
+//!
+//! [`EvalComparator`] permet de soumettre une position à N moteurs
+//! simultanément via des threads OS, puis de collecter leurs résultats.
+//!
+//! Chaque moteur tourne dans son propre processus ; les threads sont
+//! indépendants et ne partagent aucun état.
+//!
+//! ## Stratégie de parallélisme
+//!
+//! À chaque appel à [`EvalComparator::compare`] :
+//!
+//! 1. Les moteurs sont extraits du comparateur (`mem::take`).
+//! 2. Chaque moteur est déplacé (`move`) dans un thread dédié.
+//! 3. Les threads sont rejoints dans l'ordre de lancement.
+//! 4. Les moteurs sont réinsérés dans le comparateur — il est donc
+//!    réutilisable après l'appel.
+//!
+//! Si un thread panique (cas exceptionnel), le moteur correspondant
+//! est perdu mais les autres restent disponibles.
+
+use std::thread;
+
+use uci::{
+    engine::{AnalysisResult, EngineError, EnginePosition, UciEngine},
+    protocol::GoLimits,
+};
+
+use crate::config::{ConfigError, EngineConfig};
+
+// ---------------------------------------------------------------------------
+// Erreurs
+// ---------------------------------------------------------------------------
+
+/// Erreur du comparateur.
+#[derive(Debug)]
+pub enum ComparatorError {
+    /// Un moteur avec cet identifiant est déjà enregistré.
+    DuplicateId(String),
+    /// Erreur de connexion ou de communication avec le moteur.
+    Engine(EngineError),
+    /// La configuration du moteur est invalide.
+    Config(ConfigError),
+}
+
+impl std::fmt::Display for ComparatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateId(id) =>
+                write!(f, "Identifiant déjà utilisé : '{id}'"),
+            Self::Engine(e) =>
+                write!(f, "Erreur moteur : {e}"),
+            Self::Config(e) =>
+                write!(f, "Configuration invalide : {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ComparatorError {}
+
+impl From<EngineError> for ComparatorError {
+    fn from(e: EngineError) -> Self { Self::Engine(e) }
+}
+
+impl From<ConfigError> for ComparatorError {
+    fn from(e: ConfigError) -> Self { Self::Config(e) }
+}
+
+// ---------------------------------------------------------------------------
+// CompareResult
+// ---------------------------------------------------------------------------
+
+/// Résultat d'un moteur dans une comparaison.
+#[derive(Debug)]
+pub struct CompareResult {
+    /// Identifiant du moteur (tel que fourni à [`EvalComparator::add`]).
+    pub engine_id: String,
+    /// Résultat de l'analyse (ou erreur si le moteur a échoué).
+    pub result:    Result<AnalysisResult, EngineError>,
+}
+
+impl CompareResult {
+    /// Retourne `true` si l'analyse s'est terminée sans erreur.
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.result.is_ok()
+    }
+
+    /// Retourne le meilleur coup (UCI) si l'analyse a réussi.
+    #[must_use]
+    pub fn best_move(&self) -> Option<&str> {
+        self.result.as_ref().ok().map(|r| r.best_move.as_str())
+    }
+
+    /// Retourne l'évaluation centipawn de la variation principale, si disponible.
+    #[must_use]
+    pub fn score_cp(&self) -> Option<i32> {
+        use uci::parser::UciScore;
+        self.result.as_ref().ok().and_then(|r| {
+            r.principal_variation().and_then(|pv| {
+                pv.score.as_ref().and_then(|s| {
+                    if let UciScore::Centipawns(cp) = s { Some(*cp) } else { None }
+                })
+            })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EvalComparator
+// ---------------------------------------------------------------------------
+
+/// Comparateur multi-moteurs : analyse la même position en parallèle.
+///
+/// Contrairement à [`EnginePool`](crate::pool::EnginePool), le comparateur
+/// est conçu pour lancer des analyses simultanées et comparer les résultats.
+///
+/// Les moteurs sont ajoutés via [`add`](EvalComparator::add) puis consultés
+/// via [`compare`](EvalComparator::compare).
+#[derive(Default)]
+pub struct EvalComparator {
+    /// Moteurs actifs, chacun identifié par un nom libre.
+    engines: Vec<(String, UciEngine)>,
+}
+
+impl std::fmt::Debug for EvalComparator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvalComparator")
+            .field("engine_count", &self.engines.len())
+            .field("ids", &self.engine_ids())
+            .finish()
+    }
+}
+
+impl EvalComparator {
+    /// Crée un comparateur vide.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Gestion des moteurs
+    // -----------------------------------------------------------------------
+
+    /// Connecte un moteur et l'enregistre sous l'identifiant `id`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ComparatorError::DuplicateId`] si `id` est déjà présent.
+    /// - [`ComparatorError::Config`] si le binaire est invalide.
+    /// - [`ComparatorError::Engine`] si la connexion ou le handshake échoue.
+    pub fn add(
+        &mut self,
+        id:     impl Into<String>,
+        config: EngineConfig,
+    ) -> Result<(), ComparatorError> {
+        let id = id.into();
+        if self.engines.iter().any(|(eid, _)| eid == &id) {
+            return Err(ComparatorError::DuplicateId(id));
+        }
+        config.validate()?;
+        let path_str = config.path.to_str().unwrap_or_default();
+        let mut engine = UciEngine::connect_with_timeout(path_str, config.init_timeout)?;
+        for (name, value) in &config.options {
+            engine.set_option(name, Some(value.as_str()))?;
+        }
+        self.engines.push((id, engine));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Accesseurs
+    // -----------------------------------------------------------------------
+
+    /// Nombre de moteurs enregistrés.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.engines.len()
+    }
+
+    /// Retourne `true` si aucun moteur n'est enregistré.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.engines.is_empty()
+    }
+
+    /// Liste des identifiants, triée alphabétiquement.
+    #[must_use]
+    pub fn engine_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.engines.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    // -----------------------------------------------------------------------
+    // Analyse parallèle
+    // -----------------------------------------------------------------------
+
+    /// Analyse `position` avec `limits` sur tous les moteurs en parallèle.
+    ///
+    /// Retourne un vecteur de [`CompareResult`] dans le même ordre que
+    /// les moteurs ont été ajoutés.
+    ///
+    /// Les moteurs sont réinsérés dans le comparateur après l'analyse ;
+    /// [`compare`](Self::compare) peut donc être appelé plusieurs fois.
+    ///
+    /// Si un thread panique (cas exceptionnel), le moteur correspondant
+    /// est perdu mais tous les autres restent disponibles.
+    pub fn compare(
+        &mut self,
+        position: &EnginePosition,
+        limits:   &GoLimits,
+    ) -> Vec<CompareResult> {
+        // Extraire les moteurs pour en obtenir la propriété (ownership).
+        let engines = std::mem::take(&mut self.engines);
+
+        // Lancer un thread par moteur.
+        let handles: Vec<thread::JoinHandle<(String, UciEngine, Result<AnalysisResult, EngineError>)>> =
+            engines
+                .into_iter()
+                .map(|(id, mut engine)| {
+                    let pos = position.clone();
+                    let lim = limits.clone();
+                    thread::spawn(move || {
+                        let result = engine.analyze(&pos, &lim);
+                        (id, engine, result)
+                    })
+                })
+                .collect();
+
+        // Rejoindre les threads et reconstruire self.engines.
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.join() {
+                Ok((id, engine, result)) => {
+                    results.push(CompareResult { engine_id: id.clone(), result });
+                    self.engines.push((id, engine));
+                }
+                Err(_) => {
+                    // Thread en panique : le moteur est perdu.
+                    // Les autres moteurs restent disponibles.
+                }
+            }
+        }
+        results
+    }
+
+    /// Commodité : retourne uniquement les meilleurs coups par moteur.
+    ///
+    /// Chaque paire est `(engine_id, best_move_uci)`. Les moteurs ayant
+    /// retourné une erreur sont omis.
+    pub fn best_moves(
+        &mut self,
+        position: &EnginePosition,
+        limits:   &GoLimits,
+    ) -> Vec<(String, String)> {
+        self.compare(position, limits)
+            .into_iter()
+            .filter_map(|cr| {
+                cr.result.ok().map(|r| (cr.engine_id, r.best_move))
+            })
+            .collect()
+    }
+}
+
+impl Drop for EvalComparator {
+    /// Ferme tous les moteurs en parallèle (un thread par moteur, comme
+    /// [`crate::pool::EnginePool::quit_all`]) : évite jusqu'à N×3 s de
+    /// blocage séquentiel si plusieurs moteurs sont lents à répondre à
+    /// `quit` (audit perf 02/07/2026, point 3).
+    fn drop(&mut self) {
+        let engines = std::mem::take(&mut self.engines);
+        let handles: Vec<_> = engines
+            .into_iter()
+            .map(|(_, engine)| std::thread::spawn(move || engine.quit()))
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn vendetta_path() -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("../../engines/vendetta_chess_motor");
+        p
+    }
+
+    fn vendetta_config(name: &str) -> EngineConfig {
+        EngineConfig::new(name, vendetta_path())
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock engine (Unix uniquement)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn create_mock_engine() -> String {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = r#"#!/bin/sh
+while IFS= read -r line; do
+    case "$line" in
+        uci)
+            echo "id name MockEngine"
+            echo "id author TestSuite"
+            echo "uciok"
+            ;;
+        isready)
+            echo "readyok"
+            ;;
+        position*|ucinewgame) ;;
+        go*)
+            echo "info depth 1 score cp 30 nodes 100 time 5 pv e2e4"
+            echo "bestmove e2e4 ponder e7e5"
+            ;;
+        stop) echo "bestmove e2e4" ;;
+        quit) exit 0 ;;
+    esac
+done
+"#;
+        let path = std::env::temp_dir().join("vendetta_mock_comp.sh");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    fn mock_config(name: &str) -> EngineConfig {
+        let path = create_mock_engine();
+        EngineConfig::new(name, path)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests sans moteur réel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_new_is_empty() {
+        let c = EvalComparator::new();
+        assert!(c.is_empty());
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn test_add_invalid_path_fails() {
+        let mut c = EvalComparator::new();
+        let cfg = EngineConfig::new("Bad", "/nonexistent/engine");
+        assert!(matches!(c.add("bad", &cfg), Err(ComparatorError::Config(_))));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn test_compare_empty_returns_empty() {
+        let mut c = EvalComparator::new();
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(10), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_comparator_error_display() {
+        let e = ComparatorError::DuplicateId("v1".into());
+        assert!(e.to_string().contains("v1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests avec mock engine (Unix)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_add_mock_engine() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock")).unwrap();
+        assert_eq!(c.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_add_duplicate_fails() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock1")).unwrap();
+        let result = c.add("m1", mock_config("Mock2"));
+        assert!(matches!(result, Err(ComparatorError::DuplicateId(_))));
+        assert_eq!(c.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_engine_ids_sorted() {
+        let mut c = EvalComparator::new();
+        c.add("zebra", mock_config("Z")).unwrap();
+        c.add("alpha", mock_config("A")).unwrap();
+        assert_eq!(c.engine_ids(), vec!["alpha", "zebra"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compare_single_engine_one_result() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        assert_eq!(results.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compare_result_engine_id_correct() {
+        let mut c = EvalComparator::new();
+        c.add("my_engine", mock_config("Mock")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        assert_eq!(results[0].engine_id, "my_engine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compare_result_is_ok() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        assert!(results[0].is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compare_result_best_move_nonempty() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        let bm = results[0].best_move().unwrap();
+        assert!(!bm.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compare_two_engines_two_results() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock1")).unwrap();
+        c.add("m2", mock_config("Mock2")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(CompareResult::is_ok));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_engines_still_alive_after_compare() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+
+        // Deux analyses successives
+        let r1 = c.compare(&pos, &limits);
+        let r2 = c.compare(&pos, &limits);
+
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1);
+        assert!(r1[0].is_ok());
+        assert!(r2[0].is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_best_moves_returns_pairs() {
+        let mut c = EvalComparator::new();
+        c.add("m1", mock_config("Mock1")).unwrap();
+        c.add("m2", mock_config("Mock2")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+        let bm = c.best_moves(&pos, &limits);
+
+        assert_eq!(bm.len(), 2);
+        assert!(bm.iter().all(|(_, mv)| !mv.is_empty()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests avec moteur réel (vendetta_chess_motor)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parallel_two_vendetta_engines() {
+        if !vendetta_path().exists() { return; }
+        let mut c = EvalComparator::new();
+        c.add("v1", vendetta_config("Vendetta-1")).unwrap();
+        c.add("v2", vendetta_config("Vendetta-2")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(100), ..GoLimits::default() };
+        let results = c.compare(&pos, &limits);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(CompareResult::is_ok));
+    }
+
+    #[test]
+    fn test_parallel_both_return_valid_move() {
+        if !vendetta_path().exists() { return; }
+        let mut c = EvalComparator::new();
+        c.add("v1", vendetta_config("V1")).unwrap();
+        c.add("v2", vendetta_config("V2")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(100), ..GoLimits::default() };
+        let bm = c.best_moves(&pos, &limits);
+
+        assert_eq!(bm.len(), 2);
+        for (_, mv) in &bm {
+            // Format UCI : lettre+chiffre+lettre+chiffre (ex: e2e4)
+            assert_eq!(mv.len(), 4, "coup UCI invalide : '{mv}'");
+        }
+    }
+
+    #[test]
+    fn test_parallel_reusable_after_compare() {
+        if !vendetta_path().exists() { return; }
+        let mut c = EvalComparator::new();
+        c.add("v1", vendetta_config("Vendetta")).unwrap();
+
+        let pos    = EnginePosition::start();
+        let limits = GoLimits { movetime: Some(50), ..GoLimits::default() };
+
+        let r1 = c.compare(&pos, &limits);
+        let r2 = c.compare(&pos, &limits);
+
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1);
+        assert!(r1[0].is_ok());
+        assert!(r2[0].is_ok());
+    }
+}

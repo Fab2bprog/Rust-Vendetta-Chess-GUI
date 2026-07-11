@@ -1,0 +1,333 @@
+// Chessboard component — Phase 6.4/6.5/7.2/7.5/8.9/8.11.
+//
+// Phase 6.4: colored squares + pieces (static rendering).
+// Phase 6.5: selection, legal moves (dots), last move (green overlay),
+//             selection (yellow overlay), click via TouchArea + callback.
+// Phase 7.2: a–h / 1–8 coordinates (lichess style).
+// Phase 7.5: animations — fade of overlays (last-move, selection, legal).
+// Phase 8.9: SVG pieces (Unicode/Apple Symbols replacement — portable macOS+Windows).
+// Phase 8.11: flip board — `flipped` property reverses the perspective.
+//
+// Animation technique:
+//   The overlays are PERMANENT elements (no `if condition:`).
+//   Their opacity toggles between the target value and 0 depending on the condition, with
+//   `animate opacity { duration: … }`. Slint plays the interpolation on every
+//   condition change → automatic fade in/out.
+//
+// Piece SVG technique:
+//   Slint requires @image-url() at compile time (static paths).
+//   The 12 images are therefore pre-loaded as ChessBoard properties.
+//   For each square, a local `piece-img` property picks the right
+//   image via a ternary chain on sqd.piece-char ("wK", "bQ", etc.).
+//
+// Flip technique:
+//   When `flipped=true`, the visual position of each square is reversed:
+//     x = (7 - col) * sq   y = (7 - row) * sq
+//   The a–h / 1–8 coordinates adapt accordingly.
+//   `animate x/y { 200ms }` produces a smooth slide when toggling.
+
+// ── Data for a square ────────────────────────────────────────────────────────
+export struct SquareData {
+    row:             int,
+    col:             int,
+    piece-char:      string,   // 2-char ASCII identifier: "wK"…"bP", "" if empty
+    is-light:        bool,
+    piece-side:      int,      // 0=empty 1=white 2=black
+    is-selected:     bool,
+    is-legal-target: bool,
+    is-last-from:    bool,
+    is-last-to:      bool,
+    // PHASE 67: true for the square of the king currently in check (at most
+    // one square at a time — only one king can be in check simultaneously).
+    is-king-in-check: bool,
+    // PHASE 68 — Assist mode: indicators on the target squares of the
+    // currently selected piece (only when `is-legal-target`
+    // is true). Several can be true at the same time on the same
+    // square (e.g. a move that both gives check AND exposes the piece to
+    // a capture) — shown as combined badges, no priority between them.
+    is-capture-risk: bool,  // the moved piece would become capturable there
+    is-gives-check:  bool,  // this move puts the opposing king in check
+    is-gives-mate:   bool,  // this move checkmates the opposing king
+    // PHASE 69: true for the square of the king that has just been
+    // checkmated (at most one square at a time). Triggers the "groggy" effect
+    // on the piece — distinct from `is-king-in-check`, which stays true for the
+    // entire time a king is in check (including an "ordinary" non-fatal
+    // check), whereas this one is only ever true at the end of the game.
+    is-mated-king: bool,
+}
+
+// ── Chessboard component ───────────────────────────────────────────────────────
+export component ChessBoard inherits Rectangle {
+
+    in property <[SquareData]> squares;
+    in property <color> light-color: #f0d9b5;
+    in property <color> dark-color:  #b58863;
+    in property <bool>  show-coordinates: true;
+    /// When `true`, the view is flipped (Black's perspective at the bottom).
+    in property <bool>  flipped: false;
+    /// SVG commands for the hint arrow (viewbox 0 0 8 8).
+    /// Empty = no arrow. Coordinates in square units (0..8).
+    in property <string> hint-arrow-path: "";
+
+    callback square-clicked(int, int);
+
+    property <length> sq: self.width / 8;
+
+    // ── SVG images pre-loaded at compile time ──────────────────────────────
+    // Paths relative to the board.slint file → ../assets/pieces/<id>.svg
+    property <image> img-wK: @image-url("../assets/pieces/wK.svg");
+    property <image> img-wQ: @image-url("../assets/pieces/wQ.svg");
+    property <image> img-wR: @image-url("../assets/pieces/wR.svg");
+    property <image> img-wB: @image-url("../assets/pieces/wB.svg");
+    property <image> img-wN: @image-url("../assets/pieces/wN.svg");
+    property <image> img-wP: @image-url("../assets/pieces/wP.svg");
+    property <image> img-bK: @image-url("../assets/pieces/bK.svg");
+    property <image> img-bQ: @image-url("../assets/pieces/bQ.svg");
+    property <image> img-bR: @image-url("../assets/pieces/bR.svg");
+    property <image> img-bB: @image-url("../assets/pieces/bB.svg");
+    property <image> img-bN: @image-url("../assets/pieces/bN.svg");
+    property <image> img-bP: @image-url("../assets/pieces/bP.svg");
+
+    clip: true;
+
+    for sqd in squares: Rectangle {
+        // ── Visual position — reversed when flipped ────────────────────────
+        x: root.flipped ? root.sq * (7 - sqd.col) : root.sq * sqd.col;
+        y: root.flipped ? root.sq * (7 - sqd.row) : root.sq * sqd.row;
+        animate x { duration: 200ms; easing: ease-in-out; }
+        animate y { duration: 200ms; easing: ease-in-out; }
+
+        width:  root.sq;
+        height: root.sq;
+        background: sqd.is-light ? root.light-color : root.dark-color;
+
+        // ── Image selection based on the piece identifier ─────────────
+        property <image> piece-img:
+            sqd.piece-char == "wK" ? root.img-wK :
+            sqd.piece-char == "wQ" ? root.img-wQ :
+            sqd.piece-char == "wR" ? root.img-wR :
+            sqd.piece-char == "wB" ? root.img-wB :
+            sqd.piece-char == "wN" ? root.img-wN :
+            sqd.piece-char == "wP" ? root.img-wP :
+            sqd.piece-char == "bK" ? root.img-bK :
+            sqd.piece-char == "bQ" ? root.img-bQ :
+            sqd.piece-char == "bR" ? root.img-bR :
+            sqd.piece-char == "bB" ? root.img-bB :
+            sqd.piece-char == "bN" ? root.img-bN :
+            sqd.piece-char == "bP" ? root.img-bP :
+            root.img-wP; // fallback value (empty square → visible=false)
+
+        // ── Last-move overlay (green, 220 ms fade) ────────────────────────
+        Rectangle {
+            width:  parent.width;
+            height: parent.height;
+            background: #a6e3a1;
+            opacity: (sqd.is-last-from || sqd.is-last-to) ? 0.40 : 0.0;
+            animate opacity { duration: 220ms; easing: ease-out; }
+        }
+
+        // ── Selection overlay (yellow, 130 ms fade) ───────────────────────────
+        Rectangle {
+            width:  parent.width;
+            height: parent.height;
+            background: #f9e2af;
+            opacity: sqd.is-selected ? 0.55 : 0.0;
+            animate opacity { duration: 130ms; easing: ease-out; }
+        }
+
+        // ── King-in-check overlay (red, continuous pulse) — PHASE 67 ──────
+        // Same pattern already used for the pulsing puzzle-import status
+        // (`preferences.slint`): a `Timer` toggles a local boolean
+        // every 500 ms, smoothed by `animate opacity`, which produces
+        // a continuous "breathing" effect as long as the king stays in check —
+        // not a simple one-shot fade like the overlays above.
+        if sqd.is-king-in-check: check-pulse := Rectangle {
+            width:  parent.width;
+            height: parent.height;
+            background: #f38ba8;
+
+            property <bool> pulse-on: true;
+            opacity: check-pulse.pulse-on ? 0.60 : 0.25;
+            animate opacity { duration: 500ms; easing: ease-in-out; }
+
+            Timer {
+                interval: 500ms;
+                running: true;
+                triggered => { check-pulse.pulse-on = !check-pulse.pulse-on; }
+            }
+        }
+
+        // ── SVG piece ────────────────────────────────────────────────────────
+        piece-visual := Image {
+            visible: sqd.piece-char != "";
+            source:  piece-img;
+            width:   parent.width  * 0.88;
+            height:  parent.height * 0.88;
+            x: (parent.width  - self.width)  / 2;
+            y: (parent.height - self.height) / 2;
+            image-fit: contain;
+
+            // ── "Groggy" effect after checkmate (PHASE 69) ─────────────────
+            // Oscillating rotation (±9°) for at most 5 seconds on the
+            // checkmated king's piece, then a clean return to 0°.
+            //
+            // `rotation-angle`/`rotation-origin-x/y` are deprecated by
+            // Slint in favor of `transform-rotation`/`transform-origin`
+            // (found at compile time, fixed here) — `transform-origin`
+            // already defaults to the element's center, no need to
+            // set it explicitly.
+            //
+            // Fix (the effect never used to trigger): `main.rs`
+            // replaces `squares` with a BRAND NEW model
+            // (`ModelRc::new(VecModel::from(ctrl.build_squares()))`) on every
+            // move, rather than mutating an existing model in place — Slint
+            // therefore fully rebuilds the `for sqd in squares` tree
+            // (every `piece-visual` is a fresh instance on every
+            // move, never reused). A `changed mated => { ... }` can
+            // therefore never detect a "transition" (there is no prior state
+            // within the same instance): tried initially,
+            // it never fired. Replaced with the `init` callback
+            // (already documented by Slint: invoked once the element is
+            // instantiated, properties already resolved) — fires
+            // naturally every time an instance is BORN already in the
+            // "mated" state, which corresponds exactly to the move that
+            // just delivered checkmate, and also replays the effect if
+            // the user navigates back to this position from history
+            // (new instance recreated in the same state).
+            property <bool>  mated: sqd.is-mated-king;
+            property <bool>  wobbling: false;
+            property <angle> wobble-target: 0deg;
+            transform-rotation: wobbling ? wobble-target : 0deg;
+            animate transform-rotation { duration: 140ms; easing: ease-in-out; }
+
+            init => {
+                if (self.mated) {
+                    self.wobbling = true;
+                    wobble-tick.running = true;
+                    wobble-stop.running = true;
+                }
+            }
+
+            wobble-tick := Timer {
+                interval: 140ms;
+                running: false;
+                triggered => {
+                    piece-visual.wobble-target = piece-visual.wobble-target > 0deg ? -9deg : 9deg;
+                }
+            }
+
+            // Cutoff after at most 5 s, regardless of current state:
+            // return to 0° (via `wobbling = false`) and stop both timers.
+            wobble-stop := Timer {
+                interval: 5000ms;
+                running: false;
+                triggered => {
+                    piece-visual.wobbling      = false;
+                    piece-visual.wobble-target = 0deg;
+                    wobble-tick.running = false;
+                    self.running        = false;
+                }
+            }
+        }
+
+        // ── Legal-move indicator (center dot, 110 ms fade) ─────────────
+        Rectangle {
+            width:        root.sq * 0.33;
+            height:       root.sq * 0.33;
+            border-radius: root.sq * 0.165;
+            background:   #000000;
+            opacity: sqd.is-legal-target ? 0.35 : 0.0;
+            animate opacity { duration: 110ms; easing: ease-out; }
+            x: (parent.width  - self.width)  / 2;
+            y: (parent.height - self.height) / 2;
+        }
+
+        // ── Assist mode badges (PHASE 68) ────────────────────────────────
+        // Only shown on the target squares of the selected piece
+        // when Assist mode is active (these three booleans stay
+        // `false` on the Rust side if the mode is inactive — nothing to filter here).
+        // Decision made with the user: combined badges rather than a
+        // single priority (several can appear together, e.g. a
+        // move that both gives check AND exposes the piece to a capture). Only
+        // exception: "#" always implies "+" (a mate is also a check),
+        // so "+" is hidden when "#" is already shown, to avoid displaying
+        // redundant information.
+        if sqd.is-capture-risk: Text {
+            text: "!";
+            font-size: root.sq * 0.32; font-weight: 800;
+            color: #fab387; // translucent amber — risk, not a certainty
+            opacity: 0.85;
+            x: root.sq * 0.08; y: root.sq * 0.02;
+        }
+
+        if sqd.is-gives-check && !sqd.is-gives-mate: Text {
+            text: "+";
+            font-size: root.sq * 0.32; font-weight: 800;
+            color: #f38ba8; // same red as the king-in-check overlay (PHASE 67)
+            opacity: 0.85;
+            x: root.sq * 0.64; y: root.sq * 0.02;
+        }
+
+        if sqd.is-gives-mate: Text {
+            text: "#";
+            font-size: root.sq * 0.34; font-weight: 800;
+            color: #e64553; // stronger red — the most decisive outcome
+            opacity: 0.95;
+            x: root.sq * 0.64; y: root.sq * 0.02;
+        }
+
+        // ── Rank coordinate (leftmost column depending on perspective) ──────
+        // Normal  : col==0 (column a, on the left)
+        // Flipped : col==7 (column h, visually on the left)
+        // Text: unchanged — sqd.row determines the rank, whether flipped or not.
+        if (root.flipped ? sqd.col == 7 : sqd.col == 0) && root.show-coordinates: Text {
+            text: sqd.row == 0 ? "8" : sqd.row == 1 ? "7" : sqd.row == 2 ? "6" :
+                  sqd.row == 3 ? "5" : sqd.row == 4 ? "4" : sqd.row == 5 ? "3" :
+                  sqd.row == 6 ? "2" : "1";
+            font-size:   root.sq * 0.22;
+            font-weight: 700;
+            color: sqd.is-light ? root.dark-color : root.light-color;
+            x: 2px;
+            y: 2px;
+        }
+
+        // ── File coordinate (bottommost row depending on perspective) ──────
+        // Normal  : row==7 (rank 1, at the bottom)
+        // Flipped : row==0 (rank 8, visually at the bottom)
+        // Text: reversed when flipped (col 0 = h instead of a, etc.).
+        if (root.flipped ? sqd.row == 0 : sqd.row == 7) && root.show-coordinates: Text {
+            text: root.flipped
+                ? (sqd.col == 0 ? "h" : sqd.col == 1 ? "g" : sqd.col == 2 ? "f" :
+                   sqd.col == 3 ? "e" : sqd.col == 4 ? "d" : sqd.col == 5 ? "c" :
+                   sqd.col == 6 ? "b" : "a")
+                : (sqd.col == 0 ? "a" : sqd.col == 1 ? "b" : sqd.col == 2 ? "c" :
+                   sqd.col == 3 ? "d" : sqd.col == 4 ? "e" : sqd.col == 5 ? "f" :
+                   sqd.col == 6 ? "g" : "h");
+            font-size:   root.sq * 0.22;
+            font-weight: 700;
+            color: sqd.is-light ? root.dark-color : root.light-color;
+            x: parent.width  - self.width  - 2px;
+            y: parent.height - self.height - 2px;
+        }
+
+        // ── Click area ──────────────────────────────────────────────────────
+        TouchArea {
+            clicked => { root.square-clicked(sqd.row, sqd.col); }
+        }
+    }
+
+    // ── Hint arrow (overlay, viewbox 8×8 = square coordinates) ────────────
+    // Only visible when hint-arrow-path is non-empty.
+    // The arrow is computed on the Rust side (atan2/sin/cos) and passed as an SVG string.
+    if root.hint-arrow-path != "": Path {
+        x: 0; y: 0;
+        width:  root.width;
+        height: root.height;
+        commands: root.hint-arrow-path;
+        viewbox-x: 0; viewbox-y: 0;
+        viewbox-width:  8; viewbox-height: 8;
+        fill: #fab387.with-alpha(0.72);   // Catppuccin peach, semi-transparent
+        stroke: #fe640b.with-alpha(0.90); // dark peach, crisp outline
+        stroke-width: 0.04px;
+    }
+}

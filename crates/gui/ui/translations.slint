@@ -1,0 +1,388 @@
+// Slint global exposing all the translated strings.
+//
+// Updated from Rust via `i18n_bridge::apply_translations()` on
+// startup and on every language change. The properties are
+// reactive: any Slint binding that references them updates
+// automatically as soon as they change.
+//
+// Naming convention: i18n key `"a.b_c"` → Slint property `a-b-c`.
+
+export global Tr {
+
+    // ── Application ──────────────────────────────────────────────────────────
+    in-out property <string> app-name;
+    in-out property <string> app-version;
+
+    // ── Menus ─────────────────────────────────────────────────────────────────
+    in-out property <string> menu-file;
+    in-out property <string> menu-file-new-game;
+    in-out property <string> menu-file-open-pgn;
+    in-out property <string> menu-file-save-pgn;
+    in-out property <string> menu-file-quit;
+
+    in-out property <string> menu-edit;
+    in-out property <string> menu-edit-undo;
+    in-out property <string> menu-edit-copy-pgn;
+    in-out property <string> menu-edit-copy-fen;
+
+    in-out property <string> menu-view;
+    in-out property <string> menu-view-rotate-board;
+    in-out property <string> menu-view-coordinates;
+    in-out property <string> menu-view-legal-moves;
+
+    in-out property <string> menu-engine;
+    in-out property <string> menu-engine-configure;
+    in-out property <string> menu-engine-analyze;
+    in-out property <string> menu-engine-stop;
+    in-out property <string> menu-engine-multi-pv;
+
+    in-out property <string> menu-tournament;
+    in-out property <string> menu-tournament-new;
+
+    in-out property <string> menu-language;
+
+    in-out property <string> menu-help;
+    in-out property <string> menu-help-about;
+
+    // ── Chessboard ────────────────────────────────────────────────────────────
+    in-out property <string> board-white;
+    in-out property <string> board-black;
+    in-out property <string> board-turn-white;
+    in-out property <string> board-turn-black;
+    in-out property <string> board-check;
+    in-out property <string> board-checkmate;
+    in-out property <string> board-stalemate;
+    in-out property <string> board-draw;
+
+    // ── Game results ───────────────────────────────────────────────────
+    in-out property <string> game-result-white-wins;
+    in-out property <string> game-result-black-wins;
+    in-out property <string> game-result-draw;
+    in-out property <string> game-result-ongoing;
+
+    // ── Analysis ───────────────────────────────────────────────────────────────
+    in-out property <string> analysis-depth;
+    in-out property <string> analysis-score;
+    in-out property <string> analysis-nodes;
+    in-out property <string> analysis-time;
+    in-out property <string> analysis-pv;
+    in-out property <string> analysis-best-move;
+    in-out property <string> analysis-mate-in;
+
+    // ── Engine ────────────────────────────────────────────────────────────────
+    in-out property <string> engine-ready;
+    in-out property <string> engine-thinking;
+    in-out property <string> engine-stopped;
+    in-out property <string> engine-no-engine;
+
+    // ── LAN network ────────────────────────────────────────────────────────────
+    in-out property <string> network-host;
+    in-out property <string> network-join;
+    in-out property <string> network-connecting;
+    in-out property <string> network-connected;
+    in-out property <string> network-disconnected;
+    in-out property <string> network-waiting;
+    in-out property <string> network-your-turn;
+    in-out property <string> network-opponent-turn;
+
+    // ── Promotion ─────────────────────────────────────────────────────────────
+    in-out property <string> promo-choose;
+
+    // ── Buttons ───────────────────────────────────────────────────────────────
+    in-out property <string> btn-ok;
+    in-out property <string> btn-cancel;
+    in-out property <string> btn-close;
+    in-out property <string> btn-apply;
+    in-out property <string> btn-start;
+    in-out property <string> btn-stop;
+    in-out property <string> btn-new;
+    in-out property <string> btn-save;
+    in-out property <string> btn-open;
+
+    // ── Header bar tooltips ──────────────────────────────────────────────
+    in-out property <string> tooltip-export-pgn;
+    in-out property <string> tooltip-import-pgn;
+    in-out property <string> tooltip-print-game;
+    in-out property <string> tooltip-export-board-png;
+    in-out property <string> tooltip-undo;
+    in-out property <string> tooltip-copy-fen;
+    in-out property <string> tooltip-paste-fen;
+    in-out property <string> tooltip-flip-board;
+    in-out property <string> tooltip-assist-mode;
+    in-out property <string> tooltip-edit-position;
+    in-out property <string> tooltip-hint;
+    in-out property <string> tooltip-theme;
+    in-out property <string> tooltip-prefs;
+
+    // ── NAG annotation tooltips (context menu on a move) ──────────────────
+    in-out property <string> tooltip-nag-brilliant;
+    in-out property <string> tooltip-nag-good;
+    in-out property <string> tooltip-nag-interesting;
+    in-out property <string> tooltip-nag-dubious;
+    in-out property <string> tooltip-nag-mistake;
+    in-out property <string> tooltip-nag-blunder;
+
+    // ── Variation editing mode banner (PHASE 26) ───────────────────────────
+    in-out property <string> variation-banner-viewing;
+    in-out property <string> variation-banner-editing;
+    in-out property <string> btn-variation-create;
+    in-out property <string> btn-variation-exit;
+
+    // ── Preferences → "Misc" tab: debug mode (PHASE 26sexies) ────────────
+    in-out property <string> prefs-misc-title;
+    in-out property <string> debug-mode-label;
+    in-out property <string> debug-mode-explanation;
+
+    // ── "New Game" wizard → step 0 (mode choice) ──────────────────
+    in-out property <string> wizard-mode-human-vs-human;
+    in-out property <string> wizard-mode-human-vs-engine;
+    in-out property <string> wizard-mode-engine-vs-engine;
+    in-out property <string> wizard-mode-tournament;
+    in-out property <string> wizard-mode-puzzle;
+    in-out property <string> wizard-mode-reference-base;
+    in-out property <string> wizard-hint-need-2-engines;
+    in-out property <string> wizard-hint-need-puzzles;
+    in-out property <string> wizard-hint-need-engine;
+    in-out property <string> wizard-hint-need-base;
+    in-out property <string> wizard-hint-add-engine-here;
+
+    // ── Game database browser screen (PHASE 82, step 7) ──────
+    in-out property <string> refbrowser-filter-player;
+    in-out property <string> refbrowser-filter-elo-min;
+    in-out property <string> refbrowser-filter-elo-max;
+    in-out property <string> refbrowser-filter-date-from;
+    in-out property <string> refbrowser-filter-date-to;
+    in-out property <string> refbrowser-filter-eco;
+    in-out property <string> refbrowser-search-button;
+    in-out property <string> refbrowser-reset-button;
+    in-out property <string> refbrowser-col-white;
+    in-out property <string> refbrowser-col-black;
+    in-out property <string> refbrowser-col-result;
+    in-out property <string> refbrowser-col-date;
+    in-out property <string> refbrowser-col-elo;
+    in-out property <string> refbrowser-col-opening; // step 11: opening name (ECO)
+    in-out property <string> refbrowser-no-results;
+    in-out property <string> refbrowser-page-label;
+    in-out property <string> refbrowser-prev-page;
+    in-out property <string> refbrowser-next-page;
+    in-out property <string> refbrowser-results-suffix;
+    // Opening tree (PHASE 82, step 8)
+    in-out property <string> refbrowser-tab-games;
+    in-out property <string> refbrowser-tab-tree;
+    in-out property <string> refbrowser-tree-start-position;
+    in-out property <string> refbrowser-tree-back;
+    in-out property <string> refbrowser-tree-restart;
+    in-out property <string> refbrowser-tree-apply;
+    in-out property <string> refbrowser-tree-col-move;
+    in-out property <string> refbrowser-tree-col-white-pct;
+    in-out property <string> refbrowser-tree-col-draw-pct;
+    in-out property <string> refbrowser-tree-col-black-pct;
+    in-out property <string> refbrowser-tree-games-suffix;
+    in-out property <string> refbrowser-tree-no-moves;
+    // Ergonomics follow-up 10/07/2026 — bridge from the opening tree to the
+    // game list (user feedback: the tree was a dead end).
+    in-out property <string> refbrowser-tree-subtitle;
+    in-out property <string> refbrowser-tree-check-all;
+    in-out property <string> refbrowser-tree-uncheck-all;
+    in-out property <string> refbrowser-tree-list-games;
+    in-out property <string> refbrowser-tree-filter-chip-prefix;
+
+    // ── Game detail: evaluation curve on demand (PHASE 82,
+    // step 9) ───────────────────────────────────────────────────────────
+    in-out property <string> gamedetail-title;
+    in-out property <string> gamedetail-moves-label;
+    in-out property <string> gamedetail-eval-label;
+    in-out property <string> gamedetail-analyze-button;
+    in-out property <string> gamedetail-deepen-button;
+    in-out property <string> gamedetail-not-analyzed;
+    in-out property <string> gamedetail-start-from-here;
+    // Ergonomics follow-up 10/07/2026: info block for the selected move (score,
+    // quality, depth + origin, suggested best move).
+    in-out property <string> gamedetail-score-label;
+    in-out property <string> gamedetail-quality-excellent;
+    in-out property <string> gamedetail-quality-good;
+    in-out property <string> gamedetail-quality-inaccuracy;
+    in-out property <string> gamedetail-quality-mistake;
+    in-out property <string> gamedetail-quality-blunder;
+    in-out property <string> gamedetail-depth-label;
+    in-out property <string> gamedetail-pass-quick;
+    in-out property <string> gamedetail-pass-deep;
+    in-out property <string> gamedetail-best-move-label;
+
+    // ── "About" window (PHASE 30, completed here) ─────────────────────────
+    in-out property <string> about-section-author;
+    in-out property <string> about-section-license;
+    in-out property <string> about-section-technologies;
+    in-out property <string> about-lang-rust;
+    in-out property <string> about-ui-slint;
+    in-out property <string> about-made-with;
+
+    // ── "New Game" wizard → step 1 (config) + recap screen ──
+    in-out property <string> wizard-step1-time-title;
+    in-out property <string> wizard-tc-cat-unlimited;
+    in-out property <string> wizard-tc-cat-bullet;
+    in-out property <string> wizard-tc-cat-blitz;
+    in-out property <string> wizard-tc-cat-rapid;
+    in-out property <string> wizard-tc-cat-classical;
+    in-out property <string> wizard-step1-cadence-title;
+    in-out property <string> wizard-tc-desc-unlimited;
+    in-out property <string> wizard-tc-desc-bullet1;
+    in-out property <string> wizard-tc-desc-bullet2;
+    in-out property <string> wizard-tc-desc-blitz1;
+    in-out property <string> wizard-tc-desc-blitz2;
+    in-out property <string> wizard-tc-desc-rapid1;
+    in-out property <string> wizard-tc-desc-rapid2;
+    in-out property <string> wizard-tc-desc-classical;
+    in-out property <string> wizard-handicap-toggle;
+    in-out property <string> wizard-your-color-title;
+    in-out property <string> wizard-color-random;
+    in-out property <string> wizard-engine-opponent;
+    in-out property <string> wizard-engine-white;
+    in-out property <string> wizard-engine-black;
+    in-out property <string> wizard-puzzle-goal-title;
+    in-out property <string> wizard-puzzle-goal-explanation;
+    in-out property <string> wizard-puzzle-no-hint;
+    in-out property <string> wizard-puzzle-with-theme;
+    in-out property <string> wizard-puzzle-hint-button-title;
+    in-out property <string> wizard-puzzle-hint-button-explanation;
+    in-out property <string> wizard-state-active;
+    in-out property <string> wizard-state-inactive;
+    in-out property <string> wizard-start-position-title;
+    in-out property <string> wizard-pgn-load-placeholder;
+    in-out property <string> wizard-editor-define-placeholder;
+    in-out property <string> wizard-editor-custom-position;
+    in-out property <string> wizard-base-define-placeholder;
+    in-out property <string> wizard-base-custom-position;
+    in-out property <string> wizard-nav-previous;
+    in-out property <string> wizard-quit-confirm-title;
+    in-out property <string> wizard-quit-confirm-body;
+    in-out property <string> wizard-btn-no;
+    in-out property <string> wizard-btn-yes-quit;
+    in-out property <string> wizard-btn-next;
+    in-out property <string> wizard-no-engine-configured;
+    in-out property <string> wizard-recap-title;
+    in-out property <string> wizard-recap-back;
+    in-out property <string> wizard-recap-new-config;
+    in-out property <string> wizard-btn-replay;
+    in-out property <string> wizard-recap-mode-prefix;
+    in-out property <string> wizard-recap-no-engine;
+    in-out property <string> wizard-recap-two-engines;
+    in-out property <string> wizard-recap-human-prefix;
+
+    // ── Preferences (full panel) ────────────────────────────────────────
+    in-out property <string> prefs-tab-language;
+    in-out property <string> prefs-tab-engines;
+    in-out property <string> prefs-tab-openings;
+    in-out property <string> prefs-tab-puzzles;
+    in-out property <string> prefs-tab-reference-base;
+    in-out property <string> prefs-tab-appearance;
+    in-out property <string> prefs-tab-reset;
+    in-out property <string> prefs-tab-misc;
+    in-out property <string> prefs-engines-title;
+    in-out property <string> prefs-btn-add-engine;
+    in-out property <string> prefs-engines-empty;
+    in-out property <string> prefs-engine-click-hint;
+    in-out property <string> prefs-uci-params-title;
+    in-out property <string> prefs-engine-querying;
+    in-out property <string> prefs-options-count-suffix;
+    in-out property <string> prefs-hide-advanced-options;
+    in-out property <string> prefs-show-advanced-options;
+    in-out property <string> prefs-engines-auto-removed-note;
+    in-out property <string> prefs-hint-engine-title;
+    in-out property <string> prefs-hint-engine-explanation;
+    in-out property <string> prefs-none-label;
+    in-out property <string> prefs-uci-button-at-startup;
+    // PHASE 57: UCI options modal window (Reset button +
+    // warning message after automatic correction by "Validate").
+    in-out property <string> prefs-btn-reset-options;
+    in-out property <string> prefs-invalid-options-reset-msg;
+    in-out property <string> prefs-openings-title;
+    in-out property <string> prefs-openings-explanation;
+    in-out property <string> prefs-btn-load;
+    in-out property <string> prefs-puzzles-title;
+    in-out property <string> prefs-puzzles-explanation;
+    in-out property <string> prefs-puzzles-count-suffix;
+    in-out property <string> prefs-puzzles-none-imported;
+    // PHASE 82 — PGN game database browser.
+    in-out property <string> prefs-reference-base-title;
+    in-out property <string> prefs-reference-base-explanation;
+    in-out property <string> prefs-reference-base-count-suffix;
+    in-out property <string> prefs-reference-base-none-imported;
+    in-out property <string> prefs-btn-unload;
+    in-out property <string> prefs-btn-import;
+    // Explicit label for the reference-database PGN import button
+    // (distinct from the generic prefs-btn-import, used by Puzzles) —
+    // user critique 11/07/2026: "Import..." alone is ambiguous once
+    // the SCID zone was added next to it.
+    in-out property <string> prefs-btn-import-pgn;
+    // SCID import (.si4) — follow-up 11/07/2026.
+    in-out property <string> prefs-btn-import-si4;
+    in-out property <string> prefs-reset-title;
+    in-out property <string> prefs-reset-explanation;
+    in-out property <string> prefs-reset-button;
+    in-out property <string> prefs-reset-confirm-title;
+    in-out property <string> prefs-reset-confirm-body;
+    in-out property <string> prefs-btn-yes-reset;
+    in-out property <string> prefs-appearance-title;
+    in-out property <string> prefs-theme-label;
+    in-out property <string> prefs-theme-light;
+    in-out property <string> prefs-theme-dark;
+    in-out property <string> prefs-appearance-more-soon;
+
+    // ── Engine Tournament (wizard + tracking panel) ──────────────────────────
+    in-out property <string> tournament-title;
+    in-out property <string> tournament-step1-title;
+    in-out property <string> tournament-step2-title;
+    in-out property <string> tournament-step3-title;
+    in-out property <string> tournament-format-title;
+    in-out property <string> tournament-format-roundrobin-label;
+    in-out property <string> tournament-format-roundrobin-desc;
+    in-out property <string> tournament-format-gauntlet-label;
+    in-out property <string> tournament-format-gauntlet-desc;
+    in-out property <string> tournament-games-per-pair-title;
+    in-out property <string> tournament-gpp-one;
+    in-out property <string> tournament-gpp-two;
+    in-out property <string> tournament-engines-title;
+    in-out property <string> tournament-engines-selected-suffix;
+    in-out property <string> tournament-engines-select-hint;
+    in-out property <string> tournament-need-2-engines;
+    in-out property <string> tournament-challenger-label;
+    in-out property <string> tournament-gauntlet-note;
+    in-out property <string> tournament-quick-test-title;
+    in-out property <string> tournament-timed-cadences-title;
+    in-out property <string> tournament-recap-title;
+    in-out property <string> tournament-recap-engines-suffix;
+    in-out property <string> tournament-recap-games-per-pair-suffix;
+    in-out property <string> tournament-finished-title;
+    in-out property <string> tournament-in-progress-title;
+    in-out property <string> tournament-games-played-suffix;
+    in-out property <string> tournament-col-engine;
+    in-out property <string> tournament-col-points;
+    in-out property <string> tournament-col-wins;
+    in-out property <string> tournament-col-draws;
+    in-out property <string> tournament-col-losses;
+    in-out property <string> tournament-btn-stop;
+
+    // ── Position editor ──────────────────────────────────────────────────
+    in-out property <string> posedit-title;
+    in-out property <string> posedit-eraser;
+    in-out property <string> posedit-clear-all;
+    in-out property <string> posedit-turn-label;
+    in-out property <string> posedit-castling-rights;
+    in-out property <string> posedit-reset-position;
+    in-out property <string> posedit-btn-validate;
+    in-out property <string> posedit-btn-use-position;
+
+    // ── Remaining app.slint (NAG menu, puzzle end, pause, quit confirmation) ─
+    in-out property <string> app-nag-add-comment;
+    in-out property <string> app-nag-promote-variation;
+    in-out property <string> app-nag-delete-variation;
+    in-out property <string> app-puzzle-show-solution;
+    in-out property <string> app-puzzle-next;
+    in-out property <string> app-pause-pause;
+    in-out property <string> app-pause-resume;
+    in-out property <string> app-pause-banner-title;
+    in-out property <string> app-quit-confirm-title;
+    in-out property <string> app-quit-confirm-body;
+    in-out property <string> app-quit-confirm-import-warning;
+}

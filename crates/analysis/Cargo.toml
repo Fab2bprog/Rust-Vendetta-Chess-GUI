@@ -1,0 +1,13 @@
+[package]
+name = "analysis"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+uci = { path = "../uci" }
+engine = { path = "../engine" }
+db = { path = "../db" }
+rusqlite = { version = "0.31", features = ["bundled"] }

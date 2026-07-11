@@ -1,0 +1,57 @@
+// Catppuccin palettes — Mocha (dark) and Latte (light).
+//
+// Usage: import this file and read Theme.* for all colors.
+// Toggle: Theme.is-dark = !Theme.is-dark  (no Rust call required).
+//
+// Palette references:
+//   https://github.com/catppuccin/catppuccin
+
+export global Theme {
+    // ── Current mode ────────────────────────────────────────────────────────
+    /// true  = Catppuccin Mocha (dark)
+    /// false = Catppuccin Latte (light)
+    in-out property <bool> is-dark: true;
+
+    // ── Backgrounds ────────────────────────────────────────────────────────────────
+    /// Main window background.
+    out property <color> base:     is-dark ? #1e1e2e : #eff1f5;
+    /// Panel background (slightly darker/lighter than base).
+    out property <color> mantle:   is-dark ? #181825 : #e6e9ef;
+    /// Header and status bar background (highest contrast).
+    out property <color> crust:    is-dark ? #11111b : #dce0e8;
+    /// Cards / content blocks.
+    out property <color> surface0: is-dark ? #313244 : #ccd0da;
+    /// Secondary elements (avatar, separators).
+    out property <color> surface1: is-dark ? #45475a : #bcc0cc;
+
+    // ── Text ────────────────────────────────────────────────────────────────
+    /// Main text.
+    out property <color> text:     is-dark ? #cdd6f4 : #1e2030;
+    /// Subtitles / secondary text.
+    out property <color> subtext0: is-dark ? #a6adc8 : #4c4f69;
+    /// Disabled text / labels.
+    out property <color> overlay0: is-dark ? #6c7086 : #5c5f77;
+    /// Very disabled text.
+    out property <color> overlay1: is-dark ? #7f849c : #6c6f85;
+
+    // ── Accents ──────────────────────────────────────────────────────────────
+    /// Blue — main accent (buttons, indicators, analysis).
+    out property <color> blue:      is-dark ? #89b4fa : #1e66f5;
+    /// Rosewater — White pieces color / White's turn.
+    out property <color> rosewater: is-dark ? #f5e0dc : #dc8a78;
+    /// Peach — warning (clock ≤ 30 s).
+    out property <color> peach:     is-dark ? #fab387 : #fe640b;
+    /// Red — danger (clock ≤ 10 s, errors).
+    out property <color> red:       is-dark ? #f38ba8 : #d20f39;
+    /// Green — success (puzzle solved, PHASE 14 Step 6).
+    out property <color> green:     is-dark ? #a6e3a1 : #40a02b;
+    /// Yellow — discreet hint/tip (e.g. prompt to click on an engine in
+    /// Preferences, PHASE 79), not alarming enough for `peach`/`red`.
+    out property <color> yellow:    is-dark ? #f9e2af : #df8e1d;
+
+    // ── Effects ───────────────────────────────────────────────────────────────
+    /// Background on hover for interactive elements.
+    out property <color> hover:  is-dark ? #3d3f53 : #b8bcd2;
+    /// Drop shadow for cards and panels.
+    out property <color> shadow: is-dark ? #0000004d : #0000001a;
+}

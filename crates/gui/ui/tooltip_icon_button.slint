@@ -1,0 +1,62 @@
+// ui/tooltip_icon_button.slint — reusable icon button with hover tooltip.
+//
+// Extracted from `app.slint` on 10/07/2026 (ergonomics follow-up for "Game
+// Detail": added 4 buttons identical to the ones in the main window —
+// PNG, copy FEN, flip the board, export PGN). `app.slint` already imports
+// `game_detail.slint` (for `GameDetailView`): keeping the component
+// defined locally in `app.slint` would have prevented `game_detail.slint`
+// from reusing it (circular import forbidden by Slint). Extracted into its
+// own file, with no change to behavior or name — all existing call
+// sites in `app.slint` keep working identically via the new import.
+
+import { Theme } from "theme.slint";
+
+/// Header-bar icon button with hover tooltip.
+/// The tooltip appears just below the button once the mouse is positioned over it.
+export component TooltipIconButton inherits Rectangle {
+    in property <string> tooltip-text;
+    in property <string> icon-text;
+    in property <length> icon-size:   14px;
+    in property <color>  icon-color:  Theme.text;
+    in property <bool>   btn-enabled: true;
+    callback clicked;
+
+    width: 32px;
+    border-radius: 4px;
+    background: ta.has-hover && btn-enabled ? Theme.hover : Theme.surface0;
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: icon-text;
+        color: icon-color;
+        font-size: icon-size;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+
+    // Tooltip — floating rectangle below the button, rendered on top thanks to a high z
+    if ta.has-hover && tooltip-text != "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height + 5px;
+        width: tip.preferred-width + 16px;
+        height: 22px;
+        background: Theme.surface1;
+        border-radius: 4px;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: Theme.shadow;
+        z: 200;
+
+        tip := Text {
+            width: parent.width; height: parent.height;
+            text: tooltip-text;
+            color: Theme.text;
+            font-size: 11px;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: btn-enabled;
+        mouse-cursor: btn-enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}

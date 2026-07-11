@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/core",
+    "crates/uci",
+    "crates/engine",
+    "crates/gui",
+    "crates/db",
+    "crates/analysis",
+    "crates/tournament",
+    "crates/i18n",
+    "crates/network",
+    "crates/game_config",
+    "crates/app_paths",
+    "crates/scid",
+]
+
+[workspace.package]
+# Version officielle de Vendetta Chess GUI — source canonique unique, lue à la
+# compilation par `env!("CARGO_PKG_VERSION")` dans crates/gui/src/main.rs et
+# affichée dans la fenêtre "À propos" (jamais dupliquée/codée en dur ailleurs).
+version = "1.2.0"
+edition = "2021"
+authors = ["Fabrice"]
+license = "GPL-3.0-or-later"
+description = "Professional-grade chess GUI written in Rust, driving external UCI engines."
+repository = "https://github.com/Fab2bprog/Rust-Vendetta-Chess-GUI"
+
+[workspace.dependencies]
+# À compléter au fil des phases
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# panic reste "unwind" (défaut) : un panic dans un thread moteur/analyse ne doit
+# tuer que ce thread, pas faire planter toute l'application (voir audit perf 02/07/2026, point 1).
